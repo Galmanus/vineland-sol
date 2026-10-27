@@ -166,7 +166,7 @@ Measured in LiteSVM at production proof parameters (12 FRI queries, blowup 128),
 | settlement from the verified buffer (riverrun's pool) | 12,483 CU |
 | a proof copied and re-aimed at another recipient | refused on chain |
 
-The staged verifier lives in riverrun; the branch that carries it is being prepared for publication, and this section will link it. Next step: wire `withdraw` in `vineland-pool` to the verified buffer, and the committee is gone.
+The staged verifier is public in riverrun on [`feat/staged-onchain-verifier`](https://github.com/Galmanus/mirror-pool/tree/feat/staged-onchain-verifier): the protocol is in [`programs/riverrun-m31-verifier/src/staged.rs`](https://github.com/Galmanus/mirror-pool/blob/feat/staged-onchain-verifier/programs/riverrun-m31-verifier/src/staged.rs), and the LiteSVM tests that produce these numbers, under explicit 1.4M CU limits and the 1232-byte packet limit, are in [`tests/staged.rs`](https://github.com/Galmanus/mirror-pool/blob/feat/staged-onchain-verifier/programs/riverrun-m31-verifier/tests/staged.rs). Next step: wire `withdraw` in `vineland-pool` to the verified buffer, and the committee is gone.
 
 ---
 
