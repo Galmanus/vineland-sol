@@ -1,29 +1,84 @@
-# Vineland on Solana
+# Vineland
 
-**Private authorization for public money.** The payment is public. The payer isn't.
+### Private authorization for public money, on Solana.
 
-`local validator: full flow green` · `devnet: deploy pending` · `committee-gated membership` · `IslandHack V5`
+**The payment is public. The payer isn't.**
 
-Vineland is an allowlisted payment pool on Solana. An operator approves wallets at the door (KYC happens before a key can enter). An approved wallet deposits one fixed-size note of a USDC-style token into the pool's vault. Later that note is paid out to a brand-new wallet, in a transaction a relayer submits, so the depositor's key never signs the payout. Anyone can see that a note entered, that a note left, how much, and when. Nobody can see which approved depositor the payout came from.
-
-The membership check underneath is riverrun: post-quantum, hash-based Circle-STARK proofs with no trusted setup. Every value Vineland writes on chain that relates a payout to a deposit is a hash.
+`IslandHack V5` · `Solana` · `local validator: full flow green` · `devnet: deploying` · `post-quantum membership proofs` · `MIT`
 
 ---
 
-## Why it matters
+Stablecoins made dollars programmable. They also made every payment public. On a public ledger, a company that pays its suppliers in USDC publishes its supplier list, its volumes, its payroll and its treasury moves to anyone with an explorer. For a business, that is not transparency. It is operational data, and it is the reason serious money stays off public rails.
 
-Stablecoins made dollars programmable, and they made payments public. On a public ledger a company's transfers reveal its suppliers, its buyers, its payroll and its treasury moves. For a business that is not transparency. It is operational data.
+Vineland removes exactly one thing from the public record: **the link between who paid and who got paid.** Everything an auditor needs stays on chain: who was allowed in, how much moved, and when.
 
-The usual fixes hide the wrong thing:
+- **Approved at the door.** An operator allowlists wallets after KYC. Nobody else can enter.
+- **Private on the way out.** A note leaves the pool to a brand-new wallet, submitted by a relayer. The depositor never signs the payout, and nothing on chain says which approved depositor it came from.
+- **Proven, not trusted.** Membership is proven with riverrun Circle-STARKs: hash-only, no trusted setup, post-quantum, and the proof hides which deposit it refers to.
+- **Never trapped.** A depositor can always reclaim their own note publicly. A note leaves exactly once, privately or publicly, never both.
 
-| approach | who may use it | amounts | who paid |
+---
+
+## Evaluate it in 60 seconds
+
+| what to check | where |
+|---|---|
+| The program: allowlist, vault, private withdrawal, exit, fee | [`programs/vineland-pool/src/lib.rs`](programs/vineland-pool/src/lib.rs) |
+| 18 tests, one per invariant, each asserting the exact error code | [`programs/vineland-pool/tests/pool.rs`](programs/vineland-pool/tests/pool.rs) |
+| End to end with **real STARK proofs**: prove, verify, settle, refuse | [`client/tests/e2e.rs`](client/tests/e2e.rs) |
+| The full flow on a Solana validator, every step and every refusal | [`docs/LOCAL_RUN.md`](docs/LOCAL_RUN.md) |
+| Run it yourself, one command | `scripts/local_validator.sh` |
+
+---
+
+## What you see on the explorer
+
+```
+ ENTRY: public, attributable                     EXIT: public, unlinked
+
+ approved wallet --deposit 1 note--> [ pool vault ] --payout--> brand-new wallet
+                                            |        signed by a relayer only
+                                            +-----> treasury (1.97%)
+```
+
+| anyone can see | nobody can see |
+|---|---|
+| which approved wallets deposited, and when | which deposit a payout came from |
+| every amount (every note is the same size) | the depositor's secret |
+| every payout, its recipient and its time | whether two payouts trace to the same depositor |
+| the membership root and every spent nullifier | the link between a deposit and its nullifier |
+
+### Where it sits
+
+| approach | who can use it | amounts | who paid whom |
 |---|---|---|---|
 | plain SPL transfer | anyone | public | public |
 | confidential balances | anyone | hidden | public |
 | open privacy pools | anyone | hidden or fixed | hidden |
 | **Vineland** | **approved wallets only** | **public, fixed note** | **hidden among approved depositors** |
 
-Vineland keeps what an auditor needs (who was allowed in, how much moved, when) and removes the one thing a business cannot publish: the link between payer and payee.
+Compliance happens at the entry, not by surveilling the exit. That is the design choice that makes private payments usable by businesses that answer to regulators.
+
+---
+
+## Demo: the full flow, run on a Solana validator
+
+`client/src/bin/devnet_demo.rs` runs the whole lifecycle with real proofs and distinct keys for every role: an operator, a 2-of-2 verifier committee, three approved members, a relayer, and a clean wallet that nobody ever funds. Local runs (`solana-test-validator`, agave 4.3.0); the latest is recorded in [`docs/LOCAL_RUN.md`](docs/LOCAL_RUN.md):
+
+| step | result |
+|---|---|
+| a key that was never approved tries to deposit | **refused** `0xbc4` (no allowlist entry) |
+| three approved members each deposit one 1,000,000-unit note | settled |
+| the operator publishes the membership root | settled |
+| member 0 proves membership **on their own machine** | about 2.9 s; the secret never leaves the device |
+| each verifier rebuilds the tree from chain, verifies, signs | 8 to 11 ms per verifier |
+| the relayer pays the never-funded clean wallet | **980,300 received** (1,000,000 note, 1.97% fee), 1,091-byte transaction |
+| the same withdrawal replayed | **refused** `0x0` (nullifier already spent) |
+| the withdrawn note also tries to exit | **refused** `0x0` (same nullifier) |
+| member 2 exits publicly | full note refunded, no fee |
+| a withdrawal after that exit, below the anonymity floor | **refused** `0x1776` (`AnonymitySetTooSmall`) |
+
+The devnet run uses the same binary and writes `docs/DEVNET_RUN.md` with explorer links for every signature.
 
 ---
 
@@ -35,186 +90,164 @@ sequenceDiagram
     participant Op as Operator (KYC)
     participant D as Approved depositor
     participant P as vineland-pool
-    participant V as Verifiers (M of N, fixed at initialize)
+    participant V as Verifiers (M of N, fixed at launch)
     participant R as Relayer
     participant W as Clean wallet
-    participant T as Treasury
     Op->>P: allow(depositor)
-    D->>P: deposit(commitment) + one fixed note into the vault
+    D->>P: deposit(commitment) and one fixed note into the vault
     Op->>P: publish_root(root, set_size)
-    Note over D: prove on the depositor's machine with riverrun<br/>(the secret never leaves it)
-    D->>V: proof bundle + chosen recipient
-    Note over V: each verifier rebuilds the tree from the on-chain<br/>DepositRecord accounts, derives the pool's context,<br/>verifies both proofs. The proof hides which deposit it is.
+    Note over D: proves membership locally with riverrun<br/>(the secret never leaves the device)
+    D->>V: proof bundle and the chosen recipient
+    Note over V: each verifier rebuilds the tree from the on-chain<br/>deposit records and verifies both proofs.<br/>The proof hides which deposit it is.
     V-->>D: Ed25519 attestation over (pool, root, nullifier, recipient)
     D->>R: attested package
-    R->>W: creates the clean wallet's token account (relayer pays rent)
+    R->>W: opens the clean wallet's token account
     R->>P: withdraw(nullifier, root), signed by the relayer only
     P->>W: note minus 1.97%
-    P->>T: 1.97% protocol fee
 ```
 
-What the explorer shows:
+**A note** is one secret. Its commitment is `Poseidon2(secret ‖ action)` and its nullifier `Poseidon2(secret ‖ round)`, over the Mersenne-31 field, with `action` and `round` fixed per pool. One note, one nullifier, forever.
 
-```
- ENTRY (public, attributable)                  EXIT (public, unlinked)
+**The deposit tree** is riverrun's depth-127 sparse Merkle tree over the commitments. Anyone rebuilds it from the pool's `DepositRecord` accounts with one `getProgramAccounts` call.
 
- approved wallet --deposit 1 note--> [ pool vault ] --withdraw--> clean wallet
-                                           |        signed by the relayer
-                                           +------> treasury (1.97%)
-```
+**A withdrawal** is a pair of riverrun crowd proofs (binding and membership) composed on a blinded commitment, so the leaf appears in no public input. About 113 KB and 83 KB, proven in under 3 seconds on a laptop.
 
-| public | private |
+**The program** checks a quorum of verifier signatures over the exact settlement, the current root, the anonymity floor, and that the nullifier was never spent (its account is created on use, so a second spend fails). It pays the note minus the fee to the clean wallet and the fee to the treasury.
+
+### Instructions
+
+| instruction | who | what it enforces |
+|---|---|---|
+| `initialize` | operator | one mint, one note size, fee (capped at 10%), floor `k_min`, a committee of up to 8 keys with threshold `M`, **fixed for the pool's life** |
+| `allow` / `revoke` | operator | who may deposit; revoking never traps a note already inside |
+| `deposit` | approved wallet | one note into the vault, one record per commitment |
+| `publish_root` | operator | the root and how many deposits it covers, never more than exist |
+| `withdraw` | any relayer | `M` distinct attestations, current root, `set_size - exits >= k_min`, unspent nullifier |
+| `ragequit` | the depositor | full refund to their own account, burning the same nullifier a withdrawal would |
+
+Every digest the program accepts is 8 canonical Mersenne-31 limbs. Anything else is refused (`NonCanonical`), so one field element has exactly one encoding and one nullifier account.
+
+---
+
+## Trust model
+
+Proof verification is the expensive part. A riverrun proof pair is about 196 KB, and verifying it in one transaction exceeds Solana's 1.4M compute-unit cap. So today a **fixed committee** of verifier keys checks the proofs off chain and signs, and the program checks those signatures through Solana's native Ed25519 precompile.
+
+| | trusted? | why |
+|---|---|---|
+| **Privacy** | no | a verifier sees the nullifier and the recipient, never which deposit it was |
+| **Custody** | no | the vault belongs to the pool's program address; no key can move a note directly |
+| **The operator** | for liveness and the allowlist only | it cannot replace the committee, and a root over notes nobody deposited gets no signature from an honest verifier |
+| **Soundness** | yes, `M` of `N` verifiers | `M` colluding verifiers could approve a payout no proof backs |
+
+The committee is the one assumption we are removing next: see **Committee-free settlement** below.
+
+**Recipient binding.** The recipient is inside the signed message, so a relayer cannot redirect a payout. The depositor requests the attestation, not the relayer.
+
+**Post-quantum, precisely.** Everything on chain that relates a payout to a deposit is a hash, so harvesting the ledger today and running Shor's algorithm later recovers nothing. Settlement signatures (Ed25519, and Solana's own) are classical today; on-chain STARK verification moves soundness onto hashes as well.
+
+**What the anonymity set is.** The deposits under the current root, minus public exits. riverrun's ruler measures effective anonymity instead of advertising it: on a live Solana mainnet pool, an advertised `k = 30` was worth an effective 6.5, and a lone depositor exactly 1.
+
+**Not audited.** Devnet only. The proof parameters are demonstration grade. An external audit and production parameters come before mainnet.
+
+---
+
+## Committee-free settlement: measured
+
+The roadmap item that removes the committee already runs in a Solana VM. riverrun's verifier is split at its Fiat-Shamir seams into stages that each fit in one transaction, with the proof uploaded into a program-owned buffer and every challenge derived on chain.
+
+Measured in LiteSVM at production proof parameters (12 FRI queries, blowup 128), for the full binding plus membership composition:
+
+| | |
 |---|---|
-| which approved wallets deposited, and when | which deposit a payout came from |
-| every amount (all notes are the same size) | the depositor's secret |
-| every payout, its recipient and its time | whether two payouts trace to the same depositor |
-| the membership root and the spent nullifiers | the link between a commitment and its nullifier |
+| verification transactions | 20 |
+| most expensive stage | 1,209,296 CU, **86.4% of the 1.4M cap** |
+| all transactions, including proof upload | 213 |
+| settlement from the verified buffer (riverrun's pool) | 12,483 CU |
+| a proof copied and re-aimed at another recipient | refused on chain |
 
-### The program (`programs/vineland-pool`)
-
-- `initialize`: one SPL mint, one note size, a fee in basis points (capped at 1,000), a floor `k_min`, and a verifier committee of up to 8 keys with threshold `M`. **The committee is fixed here.** There is no instruction to replace it; rotation means opening a new pool.
-- `allow` / `revoke`: the operator approves or withdraws a key. Revoking gates future deposits only; a note already in the pool stays withdrawable and exitable.
-- `deposit(commitment)`: only an approved key. Moves one note into the vault and writes a `DepositRecord` (pool, depositor, commitment, index), 110 bytes, `pool` at offset 8.
-- `publish_root(root, set_size)`: the operator publishes the membership root and how many deposits it covers (never more than exist).
-- `withdraw(nullifier, root)`: any relayer. Requires `M` distinct committee attestations over exactly `(pool, root, nullifier, recipient)`, the current root, and `set_size - exits >= k_min` (exits are public, so they do not count). Creates the nullifier account, so a second spend fails. Pays `note - fee` to the recipient and `fee` to the treasury.
-- `ragequit(commitment, nullifier)`: the original depositor reclaims the full note to their own token account, with a committee attestation that the nullifier belongs to that commitment. It burns the same nullifier account a withdrawal would, so a note leaves once.
-- Every digest the program accepts (commitment, root, nullifier) must be **8 canonical Mersenne-31 limbs, u32 little-endian, 32 bytes**: each limb below `2^31 - 1`. Anything else is refused with `NonCanonical` (6013), so one field element has exactly one encoding and one nullifier account.
-
-### The verifier check (`client/src/lib.rs`)
-
-Before signing a withdrawal, each verifier, independently:
-
-1. fetches the pool's `DepositRecord` accounts (one `getProgramAccounts` with a memcmp on the pool at offset 8 and data size 110) and rebuilds the depth-127 tree from them;
-2. refuses with `RootNotTheDeposits` if the root the operator published is not that tree's root, and with `RootNotCurrent` if the bundle was proven against another root;
-3. derives the pool's `action` and `round` itself, from the pool address (SHA-256 of `vineland/note/v1` or `vineland/spend/v1` plus the pool, masked to M31), never from the bundle. One note has one nullifier, per pool;
-4. verifies the binding and membership proofs, composed on a blinded commitment, so the leaf is in no public input.
-
-For an exit, the depositor reveals the blinder; the verifier recomputes `C = compress(commitment, blinder)` and checks the binding proof, so the exit's nullifier provably belongs to that commitment.
+The staged verifier lives in riverrun; the branch that carries it is being prepared for publication, and this section will link it. Next step: wire `withdraw` in `vineland-pool` to the verified buffer, and the committee is gone.
 
 ---
 
-## Built and measured
+## Measured results
 
-Measured on a laptop, not on a validator, unless it says local validator.
+Laptop measurements unless marked otherwise.
 
-| item | result |
+| | |
 |---|---|
-| program tests (LiteSVM, `programs/vineland-pool/tests/pool.rs`) | 18 passing. Every rejection asserts its error code; three checks (in two tests) accept either of two codes where the framework refuses before the program does |
-| client end-to-end tests with real proofs (`client/tests/e2e.rs`) | 2 passing |
-| binding proof | 113,335 to 113,397 B across three runs (proofs are randomized, so sizes vary) |
-| membership proof | 82,723 to 82,793 B across the same runs |
-| proving both proofs | 2,899 to 2,954 ms |
-| one verifier's full check (both proofs plus the tree rebuild) | 8 to 11 ms |
-| withdraw transaction, committee of 2 | 1,091 B of Solana's 1,232 B limit |
-| exit transaction | 1,027 B |
-| deposit transaction | 474 B |
-| full demo on a local validator (`solana-test-validator`, agave 4.3.0) | the clean wallet, never funded, received 980,300 of a 1,000,000 note (197 bps fee) |
+| program tests (LiteSVM) | **18 passing**, one per invariant, each asserting its error code |
+| end-to-end tests with real proofs | **2 passing** |
+| binding proof / membership proof | 113,335 to 113,397 B / 82,723 to 82,793 B (randomized, three runs) |
+| proving both | 2,899 to 2,954 ms |
+| one verifier's full check (both proofs and the tree rebuild) | 8 to 11 ms |
+| withdraw / exit / deposit transaction | 1,091 / 1,027 / 474 bytes (of 1,232) |
+| riverrun on Solana devnet, prior work | [18 actions settled in one transaction](https://explorer.solana.com/tx/3SageKBifChN4t1iBnUX13riYDF1zN9UmGqp8cnfi4Pf3tzJJEnsWpiHVG9BJhdVRS4f9QvYTh5s6QAkTgSKQfCQ?cluster=devnet) |
+| riverrun on Stellar mainnet, prior work | [post-quantum membership proof verified on chain, 11 Aug 2026](https://stellar.expert/explorer/public/tx/9f776be5c0f96cd847c923a286bd7b06b4fbf48c395e85497ac4befebcf35084) |
 
-Refused on the local validator, with the program's own codes (`docs/LOCAL_RUN.md`):
+Mutation-tested: removing the nullifier burn from exits, unbinding the recipient, dropping the canonical-encoding check, or dropping the anonymity floor each turns the matching test red.
 
-| attempt | result |
+---
+
+## Built during IslandHack V5
+
+| before the hackathon | during the hackathon (19 Oct to 5 Nov 2026) |
 |---|---|
-| deposit before approval | `0xbc4` (3012, `AccountNotInitialized`: no allowlist entry) |
-| replay the same withdrawal | `0x0` (`AccountAlreadyInUse`: nullifier already spent) |
-| the withdrawn note also tries to exit | `0x0` (`AccountAlreadyInUse`) |
-| withdraw below the floor after an exit | `0x1776` (6006, `AnonymitySetTooSmall`) |
-
-Committee size and transaction size: with `M = 2` the withdraw transaction is 1,091 B (measured). Each extra attestation adds about 256 B of instruction data (computed from the layout, not measured), so `M = 2` is what fits with margin.
+| riverrun: Poseidon2-M31 Circle-STARK relations, hiding crowd proofs, the anonymity ruler | `vineland-pool`: the Solana program and its 18 invariant tests |
+| riverrun rounds on Solana devnet | `vineland-client`: notes, deposit tree, proving, verifier checks, transactions, end-to-end tests |
+| Vineland on Stellar: membership verifier on mainnet | the full demo on a Solana validator; devnet deployment |
+| | staged on-chain STARK verification, measured in LiteSVM |
 
 ---
 
-## What is live on devnet
+## Business model
 
-Nothing yet. The program ID is `AsQwEN7XiUPW2MGHEbEkh8UCKixwpSBfE1KKt5QVgYgx`, and the program is **not yet deployed to devnet**. The devnet run writes `docs/DEVNET_RUN.md` with the same shape as `docs/LOCAL_RUN.md` (every signature, the pool, the mint, the clean wallet, and the refusals); this section links it once it exists. The demo's constants: a 1,000,000 base-unit note of a 6-decimal test dollar, 197 bps, `k_min` 3, a 2-of-2 committee.
+A one-time **1.97% protocol fee** on each private payout, enforced by the program and paid to the pool's treasury. Reclaiming your own note is free. One fee, on the value that actually moves privately, with no subscription to start.
 
----
-
-## Reproduce
-
-Prerequisites: the Solana toolchain with `cargo-build-sbf`; riverrun checked out **next to this repo** (the client depends on it by path); for the local run, `solana-test-validator` and a funded default CLI wallet (`~/.config/solana/id.json`), which the demo uses only to fund fresh roles.
-
-```bash
-# riverrun, next to this repo
-git clone https://github.com/Galmanus/mirror-pool ../mirror-pool
-(cd ../mirror-pool && git checkout feat/behavioral-pool-provenance-tracer)
-
-# the program: build, then 18 LiteSVM tests
-cd programs/vineland-pool && cargo-build-sbf && cargo test
-
-# the client: 2 end-to-end tests with real proofs (proving needs --release)
-cd ../../client && cargo test --release
-
-# the full flow against a local validator (starts one with the program loaded,
-# runs the demo, then stops it and deletes its ledger)
-cd .. && scripts/local_validator.sh
-
-# the same flow on devnet, once the program is deployed
-cd client && cargo run --release --bin devnet_demo
-```
-
-The client's `Cargo.lock` was seeded from riverrun-m31's lock to pin Plonky3 0.6.2. The demo writes `docs/LOCAL_RUN.md` (with `VINELAND_RPC` set) or `docs/DEVNET_RUN.md`.
-
----
-
-## Honest scope
-
-**Committee-gated today.** A riverrun proof pair is about 196 KB and one on-chain verification costs more than a Solana transaction's compute cap, so the program does not verify it. `N` verifier keys check the proofs off chain and `M` of them sign Ed25519 attestations that the program checks through the native precompile.
-
-What that trusts:
-
-- **Soundness.** `M` colluding verifiers can approve a payout that no proof backs. Nothing on chain stops that today.
-- **The operator, for liveness and the allowlist.** It decides who may deposit and when a root is published. It is not trusted for custody: it cannot replace the committee, and a root over leaves nobody deposited gets no signature from an honest verifier.
-
-What it does not trust:
-
-- **Privacy.** A verifier learns the nullifier and the recipient, never which deposit it was.
-- **Custody.** The vault's authority is the pool's program address. No instruction lets the operator or a verifier move a note directly.
-
-**Recipient binding.** The recipient is inside the signed message, so a relayer handed an attested package cannot redirect it (`the_relayer_cannot_redirect_the_payout`). The residual risk: a member who lets the relayer request the attestation lets the relayer choose the recipient. The real fix is binding the recipient inside the proof; that is on the roadmap.
-
-**No root history.** Only the current root is accepted. A new root invalidates attestations in flight, and the member proves again.
-
-**Post-quantum, precisely.** The privacy record is post-quantum: what relates a payout to a deposit on chain is hashes, so harvesting the ledger today and running Shor later recovers nothing. Settlement authorization is not post-quantum yet: Ed25519 attestations and Solana's own signatures fall to Shor. On-chain STARK verification is what moves soundness onto hashes too.
-
-**Security level.** The proof parameters (12 FRI queries, blowup 2^7, the point riverrun's crowd tests use) are demonstration grade, not production grade. riverrun's own soundness accounting (`crates/riverrun-m31/examples/soundness_budget.rs` and the whitepaper) is the place to read the bit counts; production parameters come before mainnet.
-
-**What the anonymity set is.** At most the deposits under the current root minus the public exits. One approved wallet that deposits many notes shrinks everyone else's set (the self-fill floor); there is no per-depositor cap yet. Funding-graph analysis can shrink it further, and riverrun's ruler measures that instead of assuming it: on a live Solana mainnet pool, an advertised `k = 30` was worth an effective 6.5, and a lone depositor exactly 1 (riverrun's README).
-
-**Verifier and relayer are roles, not services.** In this build they run inside the demo binary; there is no hosted relayer or verifier network yet.
-
-**Not audited.** Devnet only. An external audit comes before any mainnet deployment.
-
----
-
-## Built before vs during IslandHack V5
-
-| before the window (riverrun and Vineland on Stellar, Jul to Oct 2026) | during the window (19 Oct to 5 Nov 2026) |
-|---|---|
-| riverrun engine: Poseidon2-M31 Circle-STARK relations, hiding crowd proofs, the funding-graph ruler | `vineland-pool`: allowlist, fixed-note SPL vault, committee-gated withdrawal to a clean wallet, ragequit on the same nullifier, fixed committee, on-chain canonicity, floor net of exits, 1.97% fee; 18 tests |
-| riverrun rounds on Solana devnet (18 actions in one transaction) | `vineland-client`: notes, the deposit tree rebuilt from chain, proving, the verifier checks, transaction builders; 2 end-to-end tests with real proofs |
-| riverrun's verifier executed in a Solana VM (LiteSVM, 2,384,277 CU for a 4-query proof of the earlier binding relation, `programs/riverrun-m31-verifier`) | the full demo on a local validator; devnet run pending |
-| Vineland on Stellar: membership verifier on mainnet | staged on-chain STARK verification: in progress |
+Who pays it: businesses paying suppliers, payroll and partners in stablecoins, treasuries moving between venues, and platforms that settle on behalf of their users. All of them need payments that are verifiable without publishing their counterparties.
 
 ---
 
 ## Roadmap
 
-1. **Staged on-chain verification.** Split one STARK verification across transactions to fit the 1.4M CU cap. Starting point: 2,384,277 CU for a 4-query proof of an earlier binding relation in LiteSVM, about 348k CU per FRI query (`programs/riverrun-m31-verifier` in riverrun). In progress. This removes the committee from soundness.
-2. **Recipient inside the proof**, so no party but the prover can choose it.
+1. **Devnet live**, with every signature linked here.
+2. **Committee-free withdrawals**: `vineland-pool` settles from the on-chain verified buffer.
 3. **On-chain root**, computed from deposits instead of published by the operator.
-4. **Prover in the browser.** The riverrun prover already compiles to WebAssembly; wire it into the wallet flow.
-5. **Hosted relayer and an independent verifier set.**
-6. **Production parameters and an external audit**, then mainnet.
+4. **Proving in the browser**: the riverrun prover already compiles to WebAssembly.
+5. **Hosted relayer** and an independent verifier set.
+6. **Production parameters, external audit, mainnet.**
+
+---
+
+## Run it
+
+Prerequisites: the Solana toolchain with `cargo-build-sbf`, and riverrun checked out next to this repo (the client depends on it by path).
+
+```bash
+git clone https://github.com/Galmanus/mirror-pool ../mirror-pool
+(cd ../mirror-pool && git checkout feat/behavioral-pool-provenance-tracer)
+
+# the program and its 18 tests
+cd programs/vineland-pool && cargo-build-sbf && cargo test
+
+# end to end with real proofs (proving needs --release)
+cd ../../client && cargo test --release
+
+# the full demo on a local validator: starts one, runs, stops, cleans up
+cd .. && scripts/local_validator.sh
+
+# the same demo on devnet, once deployed
+cd client && cargo run --release --bin devnet_demo
+```
+
+The client's `Cargo.lock` pins Plonky3 0.6.2, the version riverrun is tested against.
 
 ---
 
 ## Links
 
-- Repo: https://github.com/Galmanus/vineland-sol
-- Demo video: coming with the devnet run
-- riverrun engine: https://github.com/Galmanus/mirror-pool (branch `feat/behavioral-pool-provenance-tracer`)
-- 18 riverrun actions in one devnet transaction: https://explorer.solana.com/tx/3SageKBifChN4t1iBnUX13riYDF1zN9UmGqp8cnfi4Pf3tzJJEnsWpiHVG9BJhdVRS4f9QvYTh5s6QAkTgSKQfCQ?cluster=devnet
 - Vineland: https://vineland.app
-- Post-quantum membership proof verified on Stellar mainnet (11 Aug 2026): https://stellar.expert/explorer/public/tx/9f776be5c0f96cd847c923a286bd7b06b4fbf48c395e85497ac4befebcf35084
+- riverrun, the proof engine: https://github.com/Galmanus/mirror-pool
+- Program ID: `AsQwEN7XiUPW2MGHEbEkh8UCKixwpSBfE1KKt5QVgYgx`
 
-MIT. Built by Manuel Guilherme.
+Built by Manuel Guilherme, Brazil. MIT licensed.
