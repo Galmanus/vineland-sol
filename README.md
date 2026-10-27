@@ -4,7 +4,7 @@
 
 **The payment is public. The payer isn't.**
 
-`IslandHack V5` · `Solana` · `local validator: full flow green` · `devnet: deploying` · `post-quantum membership proofs` · `MIT`
+`IslandHack V5` · `Solana` · `devnet: live, full flow green` · `post-quantum membership proofs` · `MIT`
 
 ---
 
@@ -15,7 +15,7 @@ Vineland removes exactly one thing from the public record: **the link between wh
 - **Approved at the door.** An operator allowlists wallets after KYC. Nobody else can enter.
 - **Private on the way out.** A note leaves the pool to a brand-new wallet, submitted by a relayer. The depositor never signs the payout, and nothing on chain says which approved depositor it came from.
 - **Proven, not trusted.** Membership is proven with riverrun Circle-STARKs: hash-only, no trusted setup, post-quantum, and the proof hides which deposit it refers to.
-- **Never trapped.** A depositor can always reclaim their own note publicly. A note leaves exactly once, privately or publicly, never both.
+- **A public way out.** A depositor can reclaim their full note publicly, with no fee, and the operator cannot block it. The exit carries the same committee attestation as a withdrawal. A note leaves exactly once, privately or publicly, never both.
 
 ---
 
@@ -26,8 +26,9 @@ Vineland removes exactly one thing from the public record: **the link between wh
 | The program: allowlist, vault, private withdrawal, exit, fee | [`programs/vineland-pool/src/lib.rs`](programs/vineland-pool/src/lib.rs) |
 | 18 tests, one per invariant, each asserting the exact error code | [`programs/vineland-pool/tests/pool.rs`](programs/vineland-pool/tests/pool.rs) |
 | End to end with **real STARK proofs**: prove, verify, settle, refuse | [`client/tests/e2e.rs`](client/tests/e2e.rs) |
-| The full flow on a Solana validator, every step and every refusal | [`docs/LOCAL_RUN.md`](docs/LOCAL_RUN.md) |
-| Run it yourself, one command | `scripts/local_validator.sh` |
+| The full flow **on Solana devnet**, every step and every refusal, each signature linked to the explorer | [`docs/DEVNET_RUN.md`](docs/DEVNET_RUN.md) |
+| The private payout itself: relayer is the only signer, clean wallet `0 -> 980,300` | [explorer (devnet)](https://explorer.solana.com/tx/vWdahWzP15M12JkXHqbSN22Abh9SRFUH2fWGfA6vChCqqexiLxr2zcxUTHQvAgrfuQwtLARmx1XSEBtrbBtX38E?cluster=devnet) |
+| Run it yourself, one command, on a local validator | `scripts/local_validator.sh` |
 
 ---
 
@@ -61,24 +62,24 @@ Compliance happens at the entry, not by surveilling the exit. That is the design
 
 ---
 
-## Demo: the full flow, run on a Solana validator
+## Demo: the full flow, on Solana devnet
 
-`client/src/bin/devnet_demo.rs` runs the whole lifecycle with real proofs and distinct keys for every role: an operator, a 2-of-2 verifier committee, three approved members, a relayer, and a clean wallet that nobody ever funds. Local runs (`solana-test-validator`, agave 4.3.0); the latest is recorded in [`docs/LOCAL_RUN.md`](docs/LOCAL_RUN.md):
+`client/src/bin/devnet_demo.rs` runs the whole lifecycle with real proofs and distinct keys for every role: an operator, a 2-of-2 verifier committee, three approved members, a relayer, and a clean wallet that nobody ever funds. The program is deployed on devnet at `AsQwEN7XiUPW2MGHEbEkh8UCKixwpSBfE1KKt5QVgYgx`; the run below is recorded in [`docs/DEVNET_RUN.md`](docs/DEVNET_RUN.md), with every signature linked to the explorer:
 
 | step | result |
 |---|---|
 | a key that was never approved tries to deposit | **refused** `0xbc4` (no allowlist entry) |
-| three approved members each deposit one 1,000,000-unit note | settled |
+| three approved members each deposit one 1,000,000-unit note | settled ([member 0's deposit](https://explorer.solana.com/tx/3dju9WMAwpAnh9Ss6RUz2947MAXoh6BnCvQ7DuzeSyY7yD4F8gHZr2Hz2kGsWGQJRrHh57rgnx5jnxtMwZSSjUC3?cluster=devnet)) |
 | the operator publishes the membership root | settled |
-| member 0 proves membership **on their own machine** | about 2.9 s; the secret never leaves the device |
-| each verifier rebuilds the tree from chain, verifies, signs | 8 to 11 ms per verifier |
-| the relayer pays the never-funded clean wallet | **980,300 received** (1,000,000 note, 1.97% fee), 1,091-byte transaction |
+| member 0 proves membership **on their own machine** | 2.4 s on this run; the secret never leaves the device |
+| each verifier rebuilds the tree from chain, verifies, signs | 5 ms per verifier |
+| the relayer pays the never-funded clean wallet | **980,300 received** (1,000,000 note, 1.97% fee), 1,091-byte transaction ([explorer](https://explorer.solana.com/tx/vWdahWzP15M12JkXHqbSN22Abh9SRFUH2fWGfA6vChCqqexiLxr2zcxUTHQvAgrfuQwtLARmx1XSEBtrbBtX38E?cluster=devnet)) |
 | the same withdrawal replayed | **refused** `0x0` (nullifier already spent) |
 | the withdrawn note also tries to exit | **refused** `0x0` (same nullifier) |
-| member 2 exits publicly | full note refunded, no fee |
+| member 2 exits publicly | full note refunded, no fee ([explorer](https://explorer.solana.com/tx/3ZoX9mqgL4o1MQmurvDL9S9RiVBgGA3ukesvLNp7MHcgXhC9HUXsSwgrzpfSa3ai5H5Vtx8StHzymh4xkaQVyq3s?cluster=devnet)) |
 | a withdrawal after that exit, below the anonymity floor | **refused** `0x1776` (`AnonymitySetTooSmall`) |
 
-The devnet run uses the same binary and writes `docs/DEVNET_RUN.md` with explorer links for every signature.
+Read back from the devnet RPC at `finalized`, the payout transaction has one signer, the relayer, and moves exactly: vault `3,000,000 -> 2,000,000`, clean wallet `0 -> 980,300`, treasury `0 -> 19,700`. The clean wallet holds no SOL. The same binary also runs against a local validator ([`docs/LOCAL_RUN.md`](docs/LOCAL_RUN.md)).
 
 ---
 
@@ -123,7 +124,7 @@ sequenceDiagram
 | `deposit` | approved wallet | one note into the vault, one record per commitment |
 | `publish_root` | operator | the root and how many deposits it covers, never more than exist |
 | `withdraw` | any relayer | `M` distinct attestations, current root, `set_size - exits >= k_min`, unspent nullifier |
-| `ragequit` | the depositor | full refund to their own account, burning the same nullifier a withdrawal would |
+| `ragequit` | the depositor | `M` distinct attestations over the exit message; full refund to their own account, burning the same nullifier a withdrawal would |
 
 Every digest the program accepts is 8 canonical Mersenne-31 limbs. Anything else is refused (`NonCanonical`), so one field element has exactly one encoding and one nullifier account.
 
@@ -139,6 +140,7 @@ Proof verification is the expensive part. A riverrun proof pair is about 196 KB,
 | **Custody** | no | the vault belongs to the pool's program address; no key can move a note directly |
 | **The operator** | for liveness and the allowlist only | it cannot replace the committee, and a root over notes nobody deposited gets no signature from an honest verifier |
 | **Soundness** | yes, `M` of `N` verifiers | `M` colluding verifiers could approve a payout no proof backs |
+| **Exits** | yes, for liveness | an exit needs `M` attestations, so if fewer than `M` verifiers sign, a refund waits; on-chain verification removes this too |
 
 The committee is the one assumption we are removing next: see **Committee-free settlement** below.
 
@@ -210,12 +212,11 @@ Who pays it: businesses paying suppliers, payroll and partners in stablecoins, t
 
 ## Roadmap
 
-1. **Devnet live**, with every signature linked here.
-2. **Committee-free withdrawals**: `vineland-pool` settles from the on-chain verified buffer.
-3. **On-chain root**, computed from deposits instead of published by the operator.
-4. **Proving in the browser**: the riverrun prover already compiles to WebAssembly.
-5. **Hosted relayer** and an independent verifier set.
-6. **Production parameters, external audit, mainnet.**
+1. **Committee-free withdrawals and exits**: `vineland-pool` settles from the on-chain verified buffer.
+2. **On-chain root**, computed from deposits instead of published by the operator.
+3. **Proving in the browser**: the riverrun prover already compiles to WebAssembly.
+4. **Hosted relayer** and an independent verifier set.
+5. **Production parameters, external audit, mainnet.**
 
 ---
 
@@ -236,7 +237,7 @@ cd ../../client && cargo test --release
 # the full demo on a local validator: starts one, runs, stops, cleans up
 cd .. && scripts/local_validator.sh
 
-# the same demo on devnet, once deployed
+# the same demo on devnet (funds every role from the default CLI wallet; needs devnet SOL there)
 cd client && cargo run --release --bin devnet_demo
 ```
 
