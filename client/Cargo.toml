@@ -1,0 +1,37 @@
+[package]
+name = "vineland-client"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "The off-chain half of Vineland on Solana: notes, the deposit tree, riverrun crowd proofs, the committee check, and the transactions that settle them."
+
+[dependencies]
+# riverrun's Circle-STARK crowd proofs (github.com/Galmanus/mirror-pool,
+# branch feat/behavioral-pool-provenance-tracer); expected checked out next to
+# this repo.
+riverrun-m31 = { path = "../../mirror-pool/crates/riverrun-m31", features = ["wire-postcard"] }
+solana-sdk = "2"
+solana-client = "2"
+spl-token = "7"
+spl-associated-token-account-client = "2"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+litesvm = "0.6"
+
+# Cargo applies [patch] only from the build root, so riverrun-m31's own patches
+# are repeated here (same reason as programs/riverrun-m31-verifier upstream).
+# p3-uni-stark's carries `verify_with_known_quotient_chunks`, which the crowd
+# verifier calls, so this is required even for native builds.
+[patch.crates-io]
+p3-util = { path = "../../mirror-pool/crates/riverrun-m31/vendor/p3-util-0.6.2-sbf-patch" }
+p3-mersenne-31 = { path = "../../mirror-pool/crates/riverrun-m31/vendor/p3-mersenne-31-0.6.2-sbf-patch" }
+p3-uni-stark = { path = "../../mirror-pool/crates/riverrun-m31/vendor/p3-uni-stark-0.6.2-heap-patch" }
+p3-circle = { path = "../../mirror-pool/crates/riverrun-m31/vendor/p3-circle-0.6.2-cutrace-patch" }
+
+# Proving is slow unoptimized; tests that prove run with --release.
+[profile.dev.package."*"]
+opt-level = 3

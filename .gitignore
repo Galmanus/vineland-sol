@@ -1,0 +1,10 @@
+target/
+**/target/
+# the program's deploy key: whoever holds it can claim the program address first
+**/program-keypair.json
+*.log
+.env
+notes/
+
+# internal drafts (submission form answers, reviewer notes, deck sources)
+submission/

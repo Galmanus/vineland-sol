@@ -1,0 +1,33 @@
+[package]
+name = "vineland-pool"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Vineland on Solana: an allowlisted, fixed-note SPL pool whose withdrawals are settled by a relayer to a clean account, gated by a riverrun membership attestation."
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "vineland_pool"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+
+[dependencies]
+anchor-lang = "=1.1.2"
+# token_2022 only because anchor's `init` codegen for token accounts names
+# token_interface; the program itself accepts classic SPL Token mints only.
+anchor-spl = { version = "=1.1.2", default-features = false, features = ["token", "token_2022"] }
+# instruction introspection for the committee attestation (same check as
+# riverrun's mirror-pool program)
+solana-instructions-sysvar = "3"
+solana-sdk-ids = "3"
+
+[dev-dependencies]
+litesvm = "0.6"
+solana-sdk = "2"
+spl-token = "7"
+sha2 = "0.10"
