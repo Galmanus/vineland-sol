@@ -140,3 +140,4 @@ pre { background: #0a0a0a; border: 1px solid var(--line); border-radius: 12px; p
   .btn.big { width: 100%; padding: 15px 20px; }
   .points { grid-template-columns: 1fr; gap: 14px; margin-top: 32px; }
 }
+.kyc-line { color: var(--gold); font-size: 15px; margin: -16px 0 30px; }

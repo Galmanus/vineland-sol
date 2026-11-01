@@ -104,6 +104,7 @@ function Landing({ onLogin }) {
           On a public ledger every payment shows who paid whom. With Vineland the payment stays public and auditable, and the link back
           to you does not. For companies and for AI agents.
         </p>
+        <p className="kyc-line">Every wallet passes KYC before it can deposit. Compliance at the door, privacy on the way out.</p>
         <button className="btn primary big" onClick={onLogin}>
           Sign in with email
         </button>
@@ -235,16 +236,22 @@ function Overview({ st, cfg, address, refresh, setErr, go }) {
       <Stat label="Privacy set" value={p?.privacy_set ?? "…"} sub={`approved deposits your payment hides among (floor ${p?.k_min ?? 3})`} />
       <Stat label="In your wallet" value={units(w?.test_dollars ?? 0)} sub={`test dollars · ${(w?.sol ?? 0).toFixed(3)} SOL for fees`} />
       <div className="card">
-        <div className="label">Approval</div>
+        <div className="label">Identity check (KYC)</div>
         {w?.approved ? (
-          <div className="ok">Approved to deposit</div>
+          <>
+            <div className="ok">KYC verified · approved to deposit</div>
+            <p className="muted small">Your wallet is on the on-chain allowlist. Only verified wallets can put money in.</p>
+          </>
         ) : (
           <>
-            <div className="warn">Not approved yet</div>
-            <p className="muted small">Wallets are approved once, after KYC. On this devnet demo the operator approves you instantly.</p>
+            <div className="warn">KYC required before you can deposit</div>
+            <p className="muted small">
+              Vineland only admits verified wallets: that is what makes it usable by regulated businesses. In production an identity provider runs
+              the check; on this devnet demo the operator approves you instantly.
+            </p>
             {cfg?.operator && (
               <button className="btn primary" disabled={busy} onClick={approve}>
-                {busy ? "Approving…" : "Request approval (demo)"}
+                {busy ? "Verifying…" : "Complete KYC (devnet demo)"}
               </button>
             )}
           </>
@@ -255,7 +262,7 @@ function Overview({ st, cfg, address, refresh, setErr, go }) {
           <div className="label">Next step</div>
         </div>
         {!w?.approved ? (
-          <p>Get approved, then top up.</p>
+          <p>Complete the identity check (KYC), then top up.</p>
         ) : ready === 0 && (w?.notes?.deposited ?? 0) === 0 ? (
           <p>
             Top up: deposit test dollars as private notes. <button className="link" onClick={() => go("Top up")}>Top up →</button>
@@ -322,7 +329,7 @@ function Pay({ st, address, refresh }) {
             Amount: one note, {units(note)} test dollars · recipient gets {units(note - fee)} · fee {units(fee)} (1.97%)
           </div>
           <button className="btn primary" disabled={ready < 1 || job?.state === "running"}>
-            {ready < 1 ? "No notes ready" : "Pay privately"}
+            {ready < 1 ? "No notes yet: top up first" : "Pay privately"}
           </button>
         </div>
         {err && <div className="alert">{err}</div>}
@@ -410,7 +417,7 @@ function TopUp({ st, address, signer, refresh }) {
           <input type="number" min="1" max="5" value={count} onChange={(e) => setCount(Math.max(1, Math.min(5, +e.target.value || 1)))} className="num" />
           <span className="muted">note{count > 1 ? "s" : ""} = {units(count * note)} test dollars</span>
           <button className="btn primary" disabled={busy || !st?.wallet?.approved} onClick={deposit}>
-            {busy ? "Depositing…" : st?.wallet?.approved ? "Deposit" : "Get approved first"}
+            {busy ? "Depositing…" : st?.wallet?.approved ? "Deposit" : "Complete KYC first"}
           </button>
         </div>
         <ul className="log">
