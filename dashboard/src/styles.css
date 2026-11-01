@@ -98,3 +98,45 @@ td { border-bottom: 1px solid #191919; padding: 10px 6px; }
 .log li { padding: 4px 0; color: #cfc8bd; }
 .log li.err { color: var(--err); }
 pre { background: #0a0a0a; border: 1px solid var(--line); border-radius: 12px; padding: 16px; overflow-x: auto; font-size: 13px; color: #ddd5c8; line-height: 1.6; }
+
+/* ---- phones and small tablets ---- */
+.table-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+@media (max-width: 820px) {
+  body { font-size: 15px; }
+  /* minmax(0, 1fr): the nowrap nav must scroll, not widen the column */
+  .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
+  .side, .main { min-width: 0; }
+  .side {
+    position: sticky; top: 0; z-index: 10;
+    flex-direction: column; gap: 10px;
+    padding: 12px 16px 0; border-right: 0; border-bottom: 1px solid var(--line);
+    background: rgba(5, 5, 5, 0.94); backdrop-filter: blur(8px);
+  }
+  .side nav { flex-direction: row; gap: 2px; overflow-x: auto; scrollbar-width: none; margin: 0 -16px; padding: 0 12px 10px; }
+  .side nav::-webkit-scrollbar { display: none; }
+  .nav { white-space: nowrap; padding: 8px 12px; font-size: 14px; }
+  .side-foot { display: none; }
+  .main { padding: 18px 16px 48px; max-width: 100%; }
+  .bar { flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+  .bar h2 { font-size: 21px; }
+  .who { gap: 8px; flex-wrap: wrap; }
+  .who .muted { display: none; }
+  .grid { grid-template-columns: 1fr; gap: 12px; }
+  .card, .stat { padding: 16px; border-radius: 14px; }
+  .value { font-size: 28px; }
+  .intro p { font-size: 15px; }
+  .steps { grid-template-columns: 1fr; }
+  .row { gap: 10px; }
+  .row.between > .btn, form .btn.primary { width: 100%; }
+  table { font-size: 13px; min-width: 520px; }
+  pre { font-size: 11.5px; padding: 12px; }
+  .paid { font-size: 15px; }
+
+  .topbar { padding: 14px 16px; flex-wrap: wrap; gap: 10px; }
+  .pills { flex-wrap: wrap; gap: 6px; }
+  .hero { padding: 40px 16px 40px; }
+  .hero h1 { font-size: 31px; }
+  .lede { font-size: 16px; margin-bottom: 26px; }
+  .btn.big { width: 100%; padding: 15px 20px; }
+  .points { grid-template-columns: 1fr; gap: 14px; margin-top: 32px; }
+}

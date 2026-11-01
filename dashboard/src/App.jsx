@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePrivy } from "@privy-io/react-auth";
-import { useSignTransaction, useWallets } from "@privy-io/react-auth/solana";
+import { useCreateWallet, useSignTransaction, useWallets } from "@privy-io/react-auth/solana";
 import { api, b64ToBytes, explorer, sendRaw, short, setAuthProvider, HOSTED } from "./api.js";
 
 const DEVNET_RPC = "https://api.devnet.solana.com";
@@ -15,24 +15,39 @@ export default function App({ privy }) {
 function PrivyShell() {
   const { ready, authenticated, login, logout, user, getAccessToken } = usePrivy();
   setAuthProvider(getAccessToken);
-  const { wallets } = useWallets();
+  const { wallets, ready: walletsReady } = useWallets();
+  const { createWallet } = useCreateWallet();
   const { signTransaction } = useSignTransaction();
+  const [walletErr, setWalletErr] = useState("");
+  const creating = useRef(false);
   const wallet = wallets?.[0];
+  // The embedded wallet belongs to the account, not the site: a user who already
+  // has one (created on another origin) gets it from linkedAccounts.
+  const linked = user?.linkedAccounts?.find((a) => a.type === "wallet" && a.chainType === "solana");
+  const address = wallet?.address || linked?.address;
+
+  useEffect(() => {
+    if (!authenticated || !walletsReady || wallet || linked || creating.current) return;
+    creating.current = true;
+    createWallet().catch((e) => setWalletErr(e?.message || "could not create the wallet"));
+  }, [authenticated, walletsReady, wallet, linked, createWallet]);
+
   const signer = useMemo(
-    () =>
-      wallet && {
-        kind: "privy",
-        async signAndSend(txB64) {
-          const { signedTransaction } = await signTransaction({ transaction: b64ToBytes(txB64), wallet, chain: "solana:devnet" });
-          return sendRaw(DEVNET_RPC, signedTransaction);
-        },
+    () => ({
+      kind: "privy",
+      async signAndSend(txB64) {
+        if (!wallet) throw new Error("Your wallet is still connecting. Wait a few seconds and try again.");
+        const { signedTransaction } = await signTransaction({ transaction: b64ToBytes(txB64), wallet, chain: "solana:devnet" });
+        return sendRaw(DEVNET_RPC, signedTransaction);
       },
+    }),
     [wallet, signTransaction],
   );
   if (!ready) return <Splash text="Loading" />;
   if (!authenticated) return <Landing onLogin={login} />;
-  if (!wallet) return <Splash text="Creating your Solana wallet" />;
-  return <Dashboard address={wallet.address} signer={signer} who={user?.email?.address} onLogout={logout} />;
+  if (walletErr) return <Splash text={`Wallet error: ${walletErr}. Sign out and in again.`} />;
+  if (!address) return <Splash text={walletsReady ? "Creating your Solana wallet" : "Loading your wallet"} />;
+  return <Dashboard address={address} signer={signer} who={user?.email?.address} onLogout={logout} />;
 }
 
 function KeypairShell() {
@@ -413,7 +428,7 @@ function TopUp({ st, address, signer, refresh }) {
       </div>
       <div className="card wide">
         <div className="label">Your notes</div>
-        <table>
+        <div className="table-wrap"><table>
           <thead>
             <tr>
               <th>Note</th>
@@ -430,7 +445,7 @@ function TopUp({ st, address, signer, refresh }) {
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
       </div>
     </div>
   );
@@ -460,7 +475,7 @@ function Receipts({ address }) {
             Export for auditor (CSV)
           </button>
         </div>
-        <table>
+        <div className="table-wrap"><table>
           <thead>
             <tr>
               <th>When</th>
@@ -495,7 +510,7 @@ function Receipts({ address }) {
                 </tr>
               ))}
           </tbody>
-        </table>
+        </table></div>
       </div>
     </div>
   );
@@ -544,7 +559,7 @@ function Settings({ cfg, st }) {
   return (
     <div className="grid">
       <div className="card wide">
-        <table>
+        <div className="table-wrap"><table>
           <tbody>
             {rows.map(([k, v]) => (
               <tr key={k}>
@@ -553,7 +568,7 @@ function Settings({ cfg, st }) {
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
         <p className="muted small">Devnet only. Not audited. Amounts are public by design; the link between payer and payee is what Vineland removes.</p>
       </div>
     </div>
