@@ -70,10 +70,13 @@ Compliance happens at the entry, not by surveilling the exit. That is the design
 
 ## Use it: the dashboard
 
+**Live: [vineland.app/app](https://vineland.app/app/)** (Solana devnet, test dollars). Sign in with email and pay a supplier privately.
+
 `vineland-node` runs on the payer's own machine and serves the dashboard at `http://localhost:8790`. It keeps the notes (each secret is the money) in files only that user can read, proves on that machine, and sends the relayer nothing but a recipient-bound proof.
 
 - **A company** signs in with email through Privy and gets an embedded Solana wallet. The operator approves that wallet (KYC at the door), the wallet signs its deposits in the browser, and paying a supplier is a form: recipient, reference, Pay privately. The dashboard shows the proof being made locally, then Solana verifying it, then the payout with its explorer link. Every payout leaves a receipt only the company holds, exportable as CSV for its auditor.
 - **An AI agent** runs the same node with its own approved wallet (`VINELAND_KEYPAIR`) and calls the same API with the bearer token the node prints: `POST /api/pay {"to": ..., "notes": 1, "reference": ...}`, then polls `GET /api/jobs/<id>`.
+- **Hosted or local.** At vineland.app the node runs behind nginx: each Privy session token (ES256) is verified against Privy's published keys and every user sees and spends only their own notes. In this hosted devnet demo the notes and proofs live on Vineland's server; the open-source node keeps them on the user's own machine, and in-browser proving is next.
 - **Local only by construction:** the node binds 127.0.0.1, every API call needs the token, the Host header must be the node (no DNS rebinding) and a POST must come from its own origin (no cross-site requests). It refuses mainnet.
 
 ```bash

@@ -108,6 +108,9 @@ fn state_dir() -> PathBuf {
 #[derive(Serialize, Deserialize, Clone)]
 struct StoredNote {
     id: String,
+    /// The signed-in user (Privy `sub`) on a hosted node; empty on a local one.
+    #[serde(default)]
+    user: String,
     wallet: String,
     note: Note,
     /// pending (deposit prepared, not landed), deposited, spent, exited.
@@ -119,6 +122,8 @@ struct StoredNote {
 #[derive(Serialize, Deserialize, Clone)]
 struct Receipt {
     time: u64,
+    #[serde(default)]
+    user: String,
     wallet: String,
     reference: String,
     note: String,
@@ -253,6 +258,8 @@ fn setup() -> Res<()> {
 #[derive(Clone, Default, Serialize)]
 struct Job {
     id: u64,
+    #[serde(skip)]
+    user: String,
     state: String,
     stage: String,
     done: usize,
@@ -277,6 +284,86 @@ struct Node {
     operator: Option<Keypair>,
     jobs: Mutex<HashMap<u64, Job>>,
     next_job: AtomicU64,
+    /// Hosted mode: users sign in with Privy and see only their own notes.
+    privy: Option<Privy>,
+    /// Hosted mode: the public origin the dashboard is served from.
+    public_origin: Option<String>,
+    onboard_lock: Mutex<()>,
+}
+
+/// Verifies Privy access tokens (ES256 JWTs) against the app's published keys,
+/// with ring (already in the dependency tree). The `sub` claim is the user.
+struct Privy {
+    app_id: String,
+    keys: Vec<(String, Vec<u8>)>,
+}
+
+impl Privy {
+    fn load(app_id: &str) -> Res<Self> {
+        let url = format!("https://auth.privy.io/api/v1/apps/{app_id}/jwks.json");
+        let jwks: Value = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| e.to_string())?
+            .get(&url)
+            .send()
+            .and_then(|r| r.json())
+            .map_err(|e| format!("fetch {url}: {e}"))?;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let mut keys = vec![];
+        for k in jwks["keys"].as_array().ok_or("no keys in Privy JWKS")? {
+            if k["kty"] != "EC" || k["crv"] != "P-256" {
+                continue;
+            }
+            let (Some(kid), Some(x), Some(y)) = (k["kid"].as_str(), k["x"].as_str(), k["y"].as_str()) else { continue };
+            let (x, y) = (b64.decode(x).map_err(|e| e.to_string())?, b64.decode(y).map_err(|e| e.to_string())?);
+            let mut point = vec![4u8];
+            point.extend_from_slice(&x);
+            point.extend_from_slice(&y);
+            keys.push((kid.to_string(), point));
+        }
+        if keys.is_empty() {
+            return Err("Privy JWKS has no P-256 key".into());
+        }
+        Ok(Privy { app_id: app_id.to_string(), keys })
+    }
+
+    /// The user id of a valid, unexpired access token issued by Privy for this app.
+    fn verify(&self, token: &str) -> Res<String> {
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let parts: Vec<&str> = token.split('.').collect();
+        if parts.len() != 3 {
+            return Err("not a JWT".into());
+        }
+        let header: Value = serde_json::from_slice(&b64.decode(parts[0]).map_err(|_| "bad JWT header")?).map_err(|_| "bad JWT header")?;
+        if header["alg"] != "ES256" {
+            return Err("unexpected JWT algorithm".into());
+        }
+        let kid = header["kid"].as_str().unwrap_or("");
+        let key = self.keys.iter().find(|(k, _)| k == kid).or(self.keys.first()).map(|(_, p)| p).ok_or("no key")?;
+        let sig = b64.decode(parts[2]).map_err(|_| "bad JWT signature")?;
+        let msg = format!("{}.{}", parts[0], parts[1]);
+        ring::signature::UnparsedPublicKey::new(&ring::signature::ECDSA_P256_SHA256_FIXED, key)
+            .verify(msg.as_bytes(), &sig)
+            .map_err(|_| "JWT signature does not verify")?;
+        let claims: Value = serde_json::from_slice(&b64.decode(parts[1]).map_err(|_| "bad JWT claims")?).map_err(|_| "bad JWT claims")?;
+        if claims["iss"] != "privy.io" {
+            return Err("JWT not issued by Privy".into());
+        }
+        let aud_ok = claims["aud"] == self.app_id.as_str() || claims["aud"].as_array().is_some_and(|a| a.iter().any(|v| v == self.app_id.as_str()));
+        if !aud_ok {
+            return Err("JWT for another app".into());
+        }
+        if claims["exp"].as_u64().unwrap_or(0) + 30 < now() {
+            return Err("session expired, sign in again".into());
+        }
+        claims["sub"].as_str().filter(|s| !s.is_empty()).map(str::to_string).ok_or_else(|| "JWT without a user".to_string())
+    }
+}
+
+/// On a hosted node a user owns only what they created; a local node has one user.
+fn owns(node: &Node, user: &str, owner: &str) -> bool {
+    node.privy.is_none() || owner == user
 }
 
 fn random_token() -> String {
@@ -317,6 +404,11 @@ fn serve() -> Res<()> {
     let dashboard = std::env::var("VINELAND_DASHBOARD")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../dashboard/dist")));
+    let privy = match std::env::var("VINELAND_PRIVY_APP_ID") {
+        Ok(app) if !app.is_empty() => Some(Privy::load(&app)?),
+        _ => None,
+    };
+    let public_origin = std::env::var("VINELAND_PUBLIC_ORIGIN").ok().filter(|o| !o.is_empty());
     let node = Arc::new(Node {
         pool: cfg.pool.parse().map_err(|_| "bad pool in config")?,
         mint: cfg.mint.parse().map_err(|_| "bad mint in config")?,
@@ -331,11 +423,17 @@ fn serve() -> Res<()> {
         operator,
         jobs: Mutex::new(HashMap::new()),
         next_job: AtomicU64::new(1),
+        privy,
+        public_origin,
+        onboard_lock: Mutex::new(()),
     });
     let bind = format!("127.0.0.1:{port}");
     let server = Arc::new(Server::http(&bind).map_err(|e| format!("bind {bind}: {e}"))?);
     println!("Vineland dashboard: http://localhost:{port}");
-    println!("API token (agents send it as `Authorization: Bearer <token>`): {}", node.token);
+    match (&node.privy, &node.public_origin) {
+        (Some(_), Some(o)) => println!("hosted mode: Privy sign-in, public origin {o}"),
+        _ => println!("API token (agents send it as `Authorization: Bearer <token>`): {}", node.token),
+    }
     println!("pool {} on {}, relayer {}", node.pool, node.cfg.rpc, node.relayer_url);
     let workers: Vec<_> = (0..4)
         .map(|_| {
@@ -366,7 +464,9 @@ fn handle(node: &Arc<Node>, mut req: Request) {
         .unwrap_or_default();
 
     // No DNS rebinding: the Host must be this node.
-    let host_ok = header(&req, "Host").is_some_and(|h| h == format!("localhost:{}", node.port) || h == format!("127.0.0.1:{}", node.port));
+    let public_host = node.public_origin.as_deref().and_then(|o| o.split("://").nth(1)).unwrap_or("");
+    let host_ok = header(&req, "Host")
+        .is_some_and(|h| h == format!("localhost:{}", node.port) || h == format!("127.0.0.1:{}", node.port) || (!public_host.is_empty() && h == public_host));
     if !host_ok {
         return respond_json(req, refuse(403, "wrong Host"));
     }
@@ -374,14 +474,22 @@ fn handle(node: &Arc<Node>, mut req: Request) {
     if !path.starts_with("/api/") {
         return serve_static(node, req, &path);
     }
-    let authed = header(&req, "Authorization").is_some_and(|a| a == format!("Bearer {}", node.token));
-    if !authed {
-        return respond_json(req, refuse(401, "missing or wrong bearer token"));
-    }
+    let bearer = header(&req, "Authorization").and_then(|a| a.strip_prefix("Bearer ")).unwrap_or("").to_string();
+    let user = match &node.privy {
+        // Hosted: every user is who their Privy session says they are.
+        Some(privy) => match privy.verify(&bearer) {
+            Ok(sub) => sub,
+            Err(_) if path == "/api/config" => String::new(),
+            Err(e) => return respond_json(req, refuse(401, e)),
+        },
+        None if bearer == node.token => "local".to_string(),
+        None => return respond_json(req, refuse(401, "missing or wrong bearer token")),
+    };
     if *req.method() == Method::Post {
         // No cross-site requests: a browser POST must come from this origin.
         if let Some(origin) = header(&req, "Origin") {
-            if origin != format!("http://localhost:{}", node.port) && origin != format!("http://127.0.0.1:{}", node.port) {
+            let public = node.public_origin.as_deref().is_some_and(|o| o == origin);
+            if !public && origin != format!("http://localhost:{}", node.port) && origin != format!("http://127.0.0.1:{}", node.port) {
                 return respond_json(req, refuse(403, "cross-origin request refused"));
             }
         }
@@ -392,24 +500,24 @@ fn handle(node: &Arc<Node>, mut req: Request) {
 
     let reply = match (req.method(), path.as_str()) {
         (Method::Get, "/api/config") => config(node),
-        (Method::Get, "/api/status") => status(node, query.get("wallet").map(String::as_str)),
-        (Method::Post, "/api/onboard") => onboard(node, &body),
-        (Method::Post, "/api/deposit/prepare") => deposit_prepare(node, &body),
-        (Method::Post, "/api/deposit/confirm") => deposit_confirm(node, &body),
-        (Method::Post, "/api/deposit") => deposit_keypair(node, &body),
-        (Method::Post, "/api/pay") => pay(node, &body),
-        (Method::Get, p) if p.starts_with("/api/jobs/") => job(node, &p["/api/jobs/".len()..]),
-        (Method::Get, "/api/receipts") => receipts(node, query.get("wallet").map(String::as_str)),
+        (Method::Get, "/api/status") => status(node, &user, query.get("wallet").map(String::as_str)),
+        (Method::Post, "/api/onboard") => onboard(node, &user, &body),
+        (Method::Post, "/api/deposit/prepare") => deposit_prepare(node, &user, &body),
+        (Method::Post, "/api/deposit/confirm") => deposit_confirm(node, &user, &body),
+        (Method::Post, "/api/deposit") => deposit_keypair(node, &user, &body),
+        (Method::Post, "/api/pay") => pay(node, &user, &body),
+        (Method::Get, p) if p.starts_with("/api/jobs/") => job(node, &user, &p["/api/jobs/".len()..]),
+        (Method::Get, "/api/receipts") => receipts(node, &user, query.get("wallet").map(String::as_str)),
         (Method::Get, "/api/receipts.csv") => {
-            let csv = receipts_csv(node, query.get("wallet").map(String::as_str));
+            let csv = receipts_csv(node, &user, query.get("wallet").map(String::as_str));
             let resp = Response::from_string(csv)
                 .with_header(Header::from_bytes("Content-Type", "text/csv").unwrap())
                 .with_header(Header::from_bytes("Content-Disposition", "attachment; filename=\"vineland-receipts.csv\"").unwrap());
             let _ = req.respond(resp);
             return;
         }
-        (Method::Post, "/api/exit/prepare") => exit_prepare(node, &body),
-        (Method::Post, "/api/exit/confirm") => exit_confirm(node, &body),
+        (Method::Post, "/api/exit/prepare") => exit_prepare(node, &user, &body),
+        (Method::Post, "/api/exit/confirm") => exit_confirm(node, &user, &body),
         _ => refuse(404, "not found"),
     };
     respond_json(req, reply);
@@ -477,6 +585,7 @@ fn config(node: &Node) -> Reply {
             "keypair_wallet": node.keypair.as_ref().map(|k| k.pubkey().to_string()),
             "operator": node.operator.is_some(),
             "relayer": node.relayer_url,
+            "hosted": node.privy.is_some(),
         }),
     )
 }
@@ -508,7 +617,7 @@ fn relayer_post(node: &Node, path: &str, body: &Value, timeout: Duration) -> Res
     Err("relayer stayed busy".into())
 }
 
-fn status(node: &Node, wallet: Option<&str>) -> Reply {
+fn status(node: &Node, user: &str, wallet: Option<&str>) -> Reply {
     let p = match node.rpc.pool(&node.pool) {
         Ok(p) => p,
         Err(e) => return refuse(502, e),
@@ -529,7 +638,7 @@ fn status(node: &Node, wallet: Option<&str>) -> Reply {
         "relayer": relayer_get(node, "/health"),
     });
     if let Ok(w) = wallet_of(node, wallet) {
-        let notes: Vec<StoredNote> = node.store.all().into_iter().filter(|n| n.wallet == w.to_string()).collect();
+        let notes: Vec<StoredNote> = node.store.all().into_iter().filter(|n| n.wallet == w.to_string() && owns(node, user, &n.user)).collect();
         let count = |s: &str| notes.iter().filter(|n| n.state == s).count();
         let inserted = t.as_ref().map(|t| t.inserted).unwrap_or(0);
         let deposits = node.rpc.deposits(&node.pool).unwrap_or_default();
@@ -552,8 +661,18 @@ fn status(node: &Node, wallet: Option<&str>) -> Reply {
 
 /// Demo operator: approve a wallet and give it SOL for fees and a few test
 /// dollars. On a real deployment, approval follows KYC and nobody mints.
-fn onboard(node: &Node, body: &Value) -> Reply {
+fn onboard(node: &Node, user: &str, body: &Value) -> Reply {
     let Some(op) = node.operator.as_ref() else { return refuse(403, "this node has no operator key") };
+    let _g = node.onboard_lock.lock().unwrap();
+    let ledger = node.store.dir.join("onboarded.json");
+    let mut done: Vec<String> = std::fs::read(&ledger).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    if node.privy.is_some() {
+        // A hosted demo grants test dollars and fee SOL once per signed-in user.
+        if done.iter().any(|u| u == user) {
+            return refuse(409, "this account was already approved");
+        }
+        done.push(user.to_string());
+    }
     let w = match wallet_of(node, body["wallet"].as_str()) {
         Ok(w) => w,
         Err(e) => return refuse(400, e),
@@ -569,7 +688,12 @@ fn onboard(node: &Node, body: &Value) -> Reply {
     }
     ixs.push(spl_token::instruction::mint_to(&spl_token::id(), &node.mint, &token, &op.pubkey(), &[], GRANT_NOTES * NOTE_AMOUNT).unwrap());
     match node.rpc.land(&ixs, op, &[]) {
-        Ok((sig, _)) => (200, json!({ "signature": sig.to_string(), "approved": w.to_string(), "test_dollars": GRANT_NOTES * NOTE_AMOUNT })),
+        Ok((sig, _)) => {
+            if node.privy.is_some() {
+                let _ = write_private(&ledger, serde_json::to_string(&done).unwrap().as_bytes());
+            }
+            (200, json!({ "signature": sig.to_string(), "approved": w.to_string(), "test_dollars": GRANT_NOTES * NOTE_AMOUNT }))
+        }
         Err(e) => refuse(502, v2::explain(e.lines().next().unwrap_or(&e))),
     }
 }
@@ -581,15 +705,15 @@ fn unsigned_b64(ixs: &[solana_sdk::instruction::Instruction], payer: &Pubkey, no
     Ok(base64::engine::general_purpose::STANDARD.encode(bincode::serialize(&tx).map_err(|e| e.to_string())?))
 }
 
-fn new_note(node: &Node, w: &Pubkey) -> Res<StoredNote> {
+fn new_note(node: &Node, user: &str, w: &Pubkey) -> Res<StoredNote> {
     let note = Note::new(&node.pool);
-    let n = StoredNote { id: hex::encode(note.commitment()), wallet: w.to_string(), note, state: "pending".into(), deposit_sig: None, created: now() };
+    let n = StoredNote { id: hex::encode(note.commitment()), user: user.to_string(), wallet: w.to_string(), note, state: "pending".into(), deposit_sig: None, created: now() };
     node.store.put(&n)?;
     Ok(n)
 }
 
 /// Privy: one unsigned deposit per note, for the wallet to sign and send.
-fn deposit_prepare(node: &Node, body: &Value) -> Reply {
+fn deposit_prepare(node: &Node, user: &str, body: &Value) -> Reply {
     let w = match wallet_of(node, body["wallet"].as_str()) {
         Ok(w) => w,
         Err(e) => return refuse(400, e),
@@ -598,7 +722,7 @@ fn deposit_prepare(node: &Node, body: &Value) -> Reply {
     let token = v2::ata(&w, &node.mint);
     let mut txs = vec![];
     for _ in 0..count {
-        let n = match new_note(node, &w) {
+        let n = match new_note(node, user, &w) {
             Ok(n) => n,
             Err(e) => return refuse(500, e),
         };
@@ -618,11 +742,11 @@ fn crank_async(node: &Arc<Node>) {
     });
 }
 
-fn deposit_confirm(node: &Arc<Node>, body: &Value) -> Reply {
+fn deposit_confirm(node: &Arc<Node>, user: &str, body: &Value) -> Reply {
     let (Some(id), Some(sig)) = (body["note"].as_str(), body["signature"].as_str()) else {
         return refuse(400, "needs note and signature");
     };
-    let Some(mut n) = node.store.get(id) else { return refuse(404, "no such note") };
+    let Some(mut n) = node.store.get(id).filter(|n| owns(node, user, &n.user)) else { return refuse(404, "no such note") };
     let Ok(commitment) = hex::decode(id).map(|b| <[u8; 32]>::try_from(b).unwrap_or([0; 32])) else { return refuse(400, "bad note id") };
     // The record on chain is the proof the deposit landed, whatever the browser says.
     for _ in 0..20 {
@@ -641,13 +765,13 @@ fn deposit_confirm(node: &Arc<Node>, body: &Value) -> Reply {
 }
 
 /// Keypair mode (agents, scripts): the node signs and sends the deposits.
-fn deposit_keypair(node: &Arc<Node>, body: &Value) -> Reply {
-    let Some(kp) = node.keypair.as_ref() else { return refuse(400, "no keypair: in the dashboard, deposits are signed by your wallet") };
+fn deposit_keypair(node: &Arc<Node>, user: &str, body: &Value) -> Reply {
+    let Some(kp) = node.keypair.as_ref().filter(|_| node.privy.is_none()) else { return refuse(400, "no keypair: in the dashboard, deposits are signed by your wallet") };
     let count = body["count"].as_u64().unwrap_or(1).clamp(1, 10);
     let token = v2::ata(&kp.pubkey(), &node.mint);
     let mut out = vec![];
     for _ in 0..count {
-        let mut n = match new_note(node, &kp.pubkey()) {
+        let mut n = match new_note(node, user, &kp.pubkey()) {
             Ok(n) => n,
             Err(e) => return refuse(500, e),
         };
@@ -665,7 +789,7 @@ fn deposit_keypair(node: &Arc<Node>, body: &Value) -> Reply {
     (200, json!({ "deposits": out }))
 }
 
-fn pay(node: &Arc<Node>, body: &Value) -> Reply {
+fn pay(node: &Arc<Node>, user: &str, body: &Value) -> Reply {
     let w = match wallet_of(node, body["wallet"].as_str()) {
         Ok(w) => w,
         Err(e) => return refuse(400, e),
@@ -673,12 +797,13 @@ fn pay(node: &Arc<Node>, body: &Value) -> Reply {
     let Some(to) = body["to"].as_str().and_then(|t| t.parse::<Pubkey>().ok()) else { return refuse(400, "`to` must be a wallet address") };
     let count = body["notes"].as_u64().unwrap_or(1).clamp(1, 10) as usize;
     let reference = body["reference"].as_str().unwrap_or("").chars().take(80).collect::<String>();
-    let available: Vec<StoredNote> = node.store.all().into_iter().filter(|n| n.wallet == w.to_string() && n.state == "deposited").collect();
+    let available: Vec<StoredNote> =
+        node.store.all().into_iter().filter(|n| n.wallet == w.to_string() && n.state == "deposited" && owns(node, user, &n.user)).collect();
     if available.len() < count {
         return refuse(400, format!("only {} note(s) ready to pay", available.len()));
     }
     let id = node.next_job.fetch_add(1, Ordering::SeqCst);
-    let job = Job { id, state: "running".into(), stage: "queued".into(), notes: count, ..Default::default() };
+    let job = Job { id, user: user.to_string(), state: "running".into(), stage: "queued".into(), notes: count, ..Default::default() };
     node.jobs.lock().unwrap().insert(id, job);
     let node2 = node.clone();
     let notes: Vec<StoredNote> = available.into_iter().take(count).collect();
@@ -751,6 +876,7 @@ fn run_pay(node: &Arc<Node>, id: u64, wallet: Pubkey, to: Pubkey, notes: Vec<Sto
             let out = out?;
             Ok(Receipt {
                 time: now(),
+                user: n.user.clone(),
                 wallet: wallet.to_string(),
                 reference: reference.clone(),
                 note: n.id.clone(),
@@ -787,26 +913,30 @@ fn run_pay(node: &Arc<Node>, id: u64, wallet: Pubkey, to: Pubkey, notes: Vec<Sto
     });
 }
 
-fn job(node: &Node, id: &str) -> Reply {
+fn job(node: &Node, user: &str, id: &str) -> Reply {
     let Ok(id) = id.parse::<u64>() else { return refuse(400, "bad job id") };
-    match node.jobs.lock().unwrap().get(&id) {
+    match node.jobs.lock().unwrap().get(&id).filter(|j| owns(node, user, &j.user)) {
         Some(j) => (200, serde_json::to_value(j).unwrap()),
         None => refuse(404, "no such job"),
     }
 }
 
-fn receipts_for(node: &Node, wallet: Option<&str>) -> Vec<Receipt> {
+fn receipts_for(node: &Node, user: &str, wallet: Option<&str>) -> Vec<Receipt> {
     let w = wallet_of(node, wallet).ok().map(|w| w.to_string());
-    node.store.receipts().into_iter().filter(|r| w.as_deref().map_or(true, |w| r.wallet == w)).collect()
+    node.store
+        .receipts()
+        .into_iter()
+        .filter(|r| owns(node, user, &r.user) && w.as_deref().map_or(true, |w| r.wallet == w))
+        .collect()
 }
 
-fn receipts(node: &Node, wallet: Option<&str>) -> Reply {
-    (200, json!({ "receipts": receipts_for(node, wallet), "cluster": node.cfg.rpc }))
+fn receipts(node: &Node, user: &str, wallet: Option<&str>) -> Reply {
+    (200, json!({ "receipts": receipts_for(node, user, wallet), "cluster": node.cfg.rpc }))
 }
 
-fn receipts_csv(node: &Node, wallet: Option<&str>) -> String {
+fn receipts_csv(node: &Node, user: &str, wallet: Option<&str>) -> String {
     let mut s = String::from("time_utc,reference,recipient_wallet,recipient_token_account,paid_base_units,fee_base_units,note_commitment,nullifier,withdraw_signature,explorer\n");
-    for r in receipts_for(node, wallet) {
+    for r in receipts_for(node, user, wallet) {
         let clean = |x: &str| x.replace([',', '"', '\n'], " ");
         s.push_str(&format!(
             "{},{},{},{},{},{},{},{},{},https://explorer.solana.com/tx/{}?cluster=devnet\n",
@@ -826,8 +956,8 @@ fn receipts_csv(node: &Node, wallet: Option<&str>) -> String {
 }
 
 /// The public exit: reveals the note's secret, refunds the depositor in full.
-fn exit_prepare(node: &Node, body: &Value) -> Reply {
-    let Some(n) = body["note"].as_str().and_then(|id| node.store.get(id)) else { return refuse(404, "no such note") };
+fn exit_prepare(node: &Node, user: &str, body: &Value) -> Reply {
+    let Some(n) = body["note"].as_str().and_then(|id| node.store.get(id)).filter(|n| owns(node, user, &n.user)) else { return refuse(404, "no such note") };
     if n.state != "deposited" {
         return refuse(400, format!("note is {}", n.state));
     }
@@ -850,8 +980,8 @@ fn exit_prepare(node: &Node, body: &Value) -> Reply {
     }
 }
 
-fn exit_confirm(node: &Node, body: &Value) -> Reply {
-    let Some(mut n) = body["note"].as_str().and_then(|id| node.store.get(id)) else { return refuse(404, "no such note") };
+fn exit_confirm(node: &Node, user: &str, body: &Value) -> Reply {
+    let Some(mut n) = body["note"].as_str().and_then(|id| node.store.get(id)).filter(|n| owns(node, user, &n.user)) else { return refuse(404, "no such note") };
     let Some(sig) = body["signature"].as_str().and_then(|s| s.parse::<Signature>().ok()) else { return refuse(400, "bad signature") };
     for _ in 0..20 {
         if let Ok(Some(Ok(()))) = node.rpc.client.get_signature_status(&sig) {

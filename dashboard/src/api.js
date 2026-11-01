@@ -4,10 +4,22 @@
 
 const token = document.querySelector('meta[name="vineland-token"]')?.content ?? "";
 
+// Hosted: the Privy session token authenticates each call; local: the node's token.
+let authProvider = null;
+export function setAuthProvider(fn) {
+  authProvider = fn;
+}
+async function bearer() {
+  if (authProvider) return (await authProvider()) || "";
+  return token;
+}
+
+export const HOSTED = import.meta.env.VITE_HOSTED === "1";
+
 async function call(method, path, body) {
   const res = await fetch(path, {
     method,
-    headers: { Authorization: `Bearer ${token}`, ...(body ? { "Content-Type": "application/json" } : {}) },
+    headers: { Authorization: `Bearer ${await bearer()}`, ...(body ? { "Content-Type": "application/json" } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
@@ -29,7 +41,7 @@ export const api = {
   exitPrepare: (note) => call("POST", "/api/exit/prepare", { note }),
   exitConfirm: (note, signature) => call("POST", "/api/exit/confirm", { note, signature }),
   async receiptsCsv(wallet) {
-    const res = await fetch(`/api/receipts.csv${wallet ? `?wallet=${wallet}` : ""}`, { headers: { Authorization: `Bearer ${token}` } });
+    const res = await fetch(`/api/receipts.csv${wallet ? `?wallet=${wallet}` : ""}`, { headers: { Authorization: `Bearer ${await bearer()}` } });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.blob();
   },

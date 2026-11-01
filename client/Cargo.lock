@@ -6946,6 +6946,7 @@ dependencies = [
  "hex",
  "litesvm",
  "reqwest",
+ "ring",
  "riverrun-m31",
  "riverrun-m31-verifier",
  "serde",

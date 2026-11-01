@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import { useSignTransaction, useWallets } from "@privy-io/react-auth/solana";
-import { api, b64ToBytes, explorer, sendRaw, short } from "./api.js";
+import { api, b64ToBytes, explorer, sendRaw, short, setAuthProvider, HOSTED } from "./api.js";
 
 const DEVNET_RPC = "https://api.devnet.solana.com";
 const units = (n) => (n / 1_000_000).toFixed(2);
@@ -13,7 +13,8 @@ export default function App({ privy }) {
 }
 
 function PrivyShell() {
-  const { ready, authenticated, login, logout, user } = usePrivy();
+  const { ready, authenticated, login, logout, user, getAccessToken } = usePrivy();
+  setAuthProvider(getAccessToken);
   const { wallets } = useWallets();
   const { signTransaction } = useSignTransaction();
   const wallet = wallets?.[0];
@@ -99,7 +100,15 @@ function Landing({ onLogin }) {
             <b>Post-quantum.</b> Built only from hashes, so the privacy does not expire.
           </li>
           <li>
-            <b>Your secret stays on this machine.</b> The proof is made here.
+            {HOSTED ? (
+              <>
+                <b>Try it in your browser.</b> Devnet test dollars. In this hosted demo the proof is made on Vineland's server; in-browser proving is next.
+              </>
+            ) : (
+              <>
+                <b>Your secret stays on this machine.</b> The proof is made here.
+              </>
+            )}
           </li>
         </ul>
       </main>
@@ -306,7 +315,7 @@ function Pay({ st, address, refresh }) {
       {job && (
         <div className="card wide">
           <div className="steps">
-            <Step on={job.stage !== "starting"} done={!!job.total || job.state === "paid"} text="Proof made on this machine" />
+            <Step on={job.stage !== "starting"} done={!!job.total || job.state === "paid"} text={HOSTED ? "Proof made" : "Proof made on this machine"} />
             <Step
               on={!!job.total}
               done={job.state === "paid"}
@@ -332,8 +341,10 @@ function Pay({ st, address, refresh }) {
         </div>
       )}
       <div className="card wide muted small">
-        On devnet a private payment takes about ten minutes today: the proof is checked on Solana itself across about two hundred transactions.
-        Your secret never leaves this machine; the relayer only sees the proof and the recipient.
+        On devnet a private payment takes about ten minutes today: the proof is checked on Solana itself across about two hundred transactions.{" "}
+        {HOSTED
+          ? "In this hosted devnet demo your notes and proofs live on Vineland's server; with the open-source node, or in-browser proving (next), the secret never leaves your device."
+          : "Your secret never leaves this machine; the relayer only sees the proof and the recipient."}
       </div>
     </div>
   );
@@ -491,7 +502,7 @@ function Receipts({ address }) {
 }
 
 function Agents({ cfg }) {
-  const base = window.location.origin;
+  const base = HOSTED ? "http://localhost:8790" : window.location.origin;
   const snippet = `# what the agent's wallet can pay with right now
 curl -s ${base}/api/status -H "Authorization: Bearer $VINELAND_TOKEN"
 
@@ -510,8 +521,8 @@ curl -s ${base}/api/jobs/<JOB_ID> -H "Authorization: Bearer $VINELAND_TOKEN"`;
           Through Vineland the provider is paid from the vault: nobody can map which agent bought which service.
         </p>
         <p className="muted small">
-          The agent runs this node with its own approved wallet (<span className="mono">VINELAND_KEYPAIR</span>) and calls the same API the dashboard uses. The
-          token is printed when the node starts.
+          The agent runs the open-source node next to it, with its own approved wallet (<span className="mono">VINELAND_KEYPAIR</span>), and calls the same API this
+          dashboard uses. The token is printed when the node starts; the agent's secrets stay on the agent's machine.
         </p>
         <pre>{snippet}</pre>
       </div>
