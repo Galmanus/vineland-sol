@@ -17,7 +17,7 @@ set -euo pipefail
 SOLANA_BIN=${SOLANA_BIN:-$HOME/.local/share/solana/install/active_release/bin}
 CLIENT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 POOL_SO=${VINELAND_POOL_V2_SO:-$CLIENT/../programs/vineland-pool/target/deploy/vineland_pool.so}
-VERIFIER_SO=${RIVERRUN_VERIFIER_SO:-$CLIENT/../../mirror-pool/.claude/worktrees/agent-ae0080ba263a865c1/programs/riverrun-m31-verifier/target/deploy/riverrun_m31_verifier.so}
+VERIFIER_SO=${RIVERRUN_VERIFIER_SO:?"set RIVERRUN_VERIFIER_SO to the verifier .so (solana program dump -u devnet 8vPHUTH27WXYNvNoaBTJGWWceNSVrNXHZSTYkaywkcYo /tmp/riverrun_m31_verifier.so)"}
 POOL_ID=3W1FD5Q1ELFzVAoJUasSj3aZGmgs4zrRdgfZZV1K5VXi
 VERIFIER_ID=8vPHUTH27WXYNvNoaBTJGWWceNSVrNXHZSTYkaywkcYo
 RPC_PORT=${RPC_PORT:-18899}

@@ -3,10 +3,12 @@
 //! by riverrun's staged verifier program, and the pool paying the clean account
 //! from that verified buffer. No committee key exists anywhere in this test.
 //!
-//! Needs both SBF artifacts: `cargo build-sbf` in programs/vineland-pool, and in
-//! mirror-pool's programs/riverrun-m31-verifier (ce5e8c7), or their paths in
-//! `VINELAND_POOL_V2_SO` / `RIVERRUN_VERIFIER_SO`.
-//!   cargo test --release --test committee_free -- --ignored --nocapture
+//! Needs both SBF artifacts: `cargo build-sbf` in programs/vineland-pool (or its
+//! path in `VINELAND_POOL_V2_SO`), and the verifier's in `RIVERRUN_VERIFIER_SO`
+//! (the deployed one: `solana program dump -u devnet
+//! 8vPHUTH27WXYNvNoaBTJGWWceNSVrNXHZSTYkaywkcYo /tmp/riverrun_m31_verifier.so`).
+//!   RIVERRUN_VERIFIER_SO=/tmp/riverrun_m31_verifier.so \
+//!     cargo test --release --test committee_free -- --ignored --nocapture
 
 use litesvm::LiteSVM;
 use riverrun_m31_verifier::client as staged_client;
@@ -73,13 +75,7 @@ fn a_private_payout_settles_with_no_committee_at_all() {
     let mut svm = LiteSVM::new();
     let pool_so = std::env::var("VINELAND_POOL_V2_SO")
         .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../programs/vineland-pool/target/deploy/vineland_pool.so").into());
-    let verifier_so = std::env::var("RIVERRUN_VERIFIER_SO").unwrap_or_else(|_| {
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../mirror-pool/.claude/worktrees/agent-ae0080ba263a865c1/programs/riverrun-m31-verifier/target/deploy/riverrun_m31_verifier.so"
-        )
-        .into()
-    });
+    let verifier_so = std::env::var("RIVERRUN_VERIFIER_SO").expect("set RIVERRUN_VERIFIER_SO to the verifier .so, e.g. `solana program dump -u devnet 8vPHUTH27WXYNvNoaBTJGWWceNSVrNXHZSTYkaywkcYo /tmp/riverrun_m31_verifier.so`");
     svm.add_program_from_file(POOL_ID, &pool_so).expect("pool v2 .so");
     svm.add_program_from_file(VERIFIER_ID, &verifier_so).expect("verifier .so");
     let mut chain = Chain { svm };

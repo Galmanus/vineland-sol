@@ -4,8 +4,9 @@
 //! heap, every transaction checked against the 1232-byte packet), and the
 //! finalized buffer read back the way the pool program will read it.
 //!
-//! Needs the verifier's SBF artifact (mirror-pool at ce5e8c7, `cargo build-sbf`
-//! in programs/riverrun-m31-verifier), or its path in `RIVERRUN_VERIFIER_SO`:
+//! Needs the verifier's SBF artifact in `RIVERRUN_VERIFIER_SO` (mirror-pool at
+//! ce5e8c7, `cargo build-sbf` in programs/riverrun-m31-verifier, or the deployed
+//! one: `solana program dump -u devnet 8vPHUTH27WXYNvNoaBTJGWWceNSVrNXHZSTYkaywkcYo`):
 //!   cargo test --release --test staged -- --ignored --nocapture --test-threads 1
 
 use std::sync::OnceLock;
@@ -59,13 +60,7 @@ fn fixture() -> &'static Fixture {
 
 fn svm() -> (LiteSVM, Keypair) {
     let mut svm = LiteSVM::new();
-    let so = std::env::var("RIVERRUN_VERIFIER_SO").unwrap_or_else(|_| {
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../mirror-pool/.claude/worktrees/agent-ae0080ba263a865c1/programs/riverrun-m31-verifier/target/deploy/riverrun_m31_verifier.so"
-        )
-        .to_string()
-    });
+    let so = std::env::var("RIVERRUN_VERIFIER_SO").expect("set RIVERRUN_VERIFIER_SO to the verifier .so, e.g. `solana program dump -u devnet 8vPHUTH27WXYNvNoaBTJGWWceNSVrNXHZSTYkaywkcYo /tmp/riverrun_m31_verifier.so`");
     svm.add_program_from_file(VERIFIER_ID, &so).expect("load the verifier .so (cargo build-sbf in mirror-pool)");
     let payer = Keypair::new();
     svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();

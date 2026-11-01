@@ -2239,6 +2239,7 @@ dependencies = [
 [[package]]
 name = "p3-circle"
 version = "0.6.2"
+source = "git+https://github.com/Galmanus/mirror-pool?rev=ce5e8c7cfe55e116c2139f5413e76c961848079c#ce5e8c7cfe55e116c2139f5413e76c961848079c"
 dependencies = [
  "itertools 0.15.0",
  "p3-challenger",
@@ -2391,6 +2392,7 @@ dependencies = [
 [[package]]
 name = "p3-mersenne-31"
 version = "0.6.2"
+source = "git+https://github.com/Galmanus/mirror-pool?rev=ce5e8c7cfe55e116c2139f5413e76c961848079c#ce5e8c7cfe55e116c2139f5413e76c961848079c"
 dependencies = [
  "itertools 0.15.0",
  "num-bigint 0.4.8",
@@ -2501,6 +2503,7 @@ dependencies = [
 [[package]]
 name = "p3-uni-stark"
 version = "0.6.2"
+source = "git+https://github.com/Galmanus/mirror-pool?rev=ce5e8c7cfe55e116c2139f5413e76c961848079c#ce5e8c7cfe55e116c2139f5413e76c961848079c"
 dependencies = [
  "itertools 0.15.0",
  "libm",
@@ -2521,6 +2524,7 @@ dependencies = [
 [[package]]
 name = "p3-util"
 version = "0.6.2"
+source = "git+https://github.com/Galmanus/mirror-pool?rev=ce5e8c7cfe55e116c2139f5413e76c961848079c#ce5e8c7cfe55e116c2139f5413e76c961848079c"
 dependencies = [
  "serde",
 ]
@@ -2897,6 +2901,7 @@ dependencies = [
 [[package]]
 name = "riverrun-m31"
 version = "0.1.0"
+source = "git+https://github.com/Galmanus/mirror-pool?rev=ce5e8c7cfe55e116c2139f5413e76c961848079c#ce5e8c7cfe55e116c2139f5413e76c961848079c"
 dependencies = [
  "p3-air",
  "p3-challenger",
