@@ -28,6 +28,7 @@ Vineland removes exactly one thing from the public record: **the link between wh
 | End to end with **real STARK proofs**: prove, verify, settle, refuse | [`client/tests/e2e.rs`](client/tests/e2e.rs) |
 | The full flow **on Solana devnet**, every step and every refusal, each signature linked to the explorer | [`docs/DEVNET_RUN.md`](docs/DEVNET_RUN.md) |
 | The private payout itself: relayer is the only signer, clean wallet `0 -> 980,300` | [explorer (devnet)](https://explorer.solana.com/tx/vWdahWzP15M12JkXHqbSN22Abh9SRFUH2fWGfA6vChCqqexiLxr2zcxUTHQvAgrfuQwtLARmx1XSEBtrbBtX38E?cluster=devnet) |
+| The pitch deck, 10 slides | [`docs/vineland-deck.pdf`](docs/vineland-deck.pdf) |
 | Run it yourself, one command, on a local validator | `scripts/local_validator.sh` |
 
 ---
