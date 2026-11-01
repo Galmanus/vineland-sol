@@ -2,6 +2,9 @@
 //!
 //! Run (proving is slow unoptimized):
 //!   (cd ../programs/vineland-pool && cargo-build-sbf) && cargo test --release
+//! or point `VINELAND_POOL_SO` at a built `vineland_pool.so`. These are the
+//! committee version's tests: they need a program that still takes Ed25519
+//! attestations.
 
 use litesvm::LiteSVM;
 use solana_sdk::{
@@ -74,8 +77,10 @@ impl Chain {
 
 fn setup(committee: &[Keypair], threshold: u8, k_min: u32) -> Chain {
     let mut svm = LiteSVM::new();
-    let so = concat!(env!("CARGO_MANIFEST_DIR"), "/../programs/vineland-pool/target/deploy/vineland_pool.so");
-    svm.add_program_from_file(PROGRAM_ID, so).expect("build the program first");
+    let so = std::env::var("VINELAND_POOL_SO").unwrap_or_else(|_| {
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../programs/vineland-pool/target/deploy/vineland_pool.so").to_string()
+    });
+    svm.add_program_from_file(PROGRAM_ID, &so).expect("build the program first");
     let authority = Keypair::new();
     svm.airdrop(&authority.pubkey(), 10_000_000_000).unwrap();
     let mint = Keypair::new();

@@ -3419,6 +3419,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "riverrun-m31-verifier"
+version = "0.1.0"
+dependencies = [
+ "riverrun-m31",
+ "solana-program",
+ "tracing",
+]
+
+[[package]]
 name = "rustc-demangle"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6905,6 +6914,7 @@ dependencies = [
  "hex",
  "litesvm",
  "riverrun-m31",
+ "riverrun-m31-verifier",
  "serde",
  "serde_json",
  "sha2 0.10.9",

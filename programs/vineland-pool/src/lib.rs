@@ -5,9 +5,9 @@
 //!
 //! An operator approves addresses (the allowlist: KYC happens at the door, before
 //! a key can enter). An approved key deposits one fixed-size note of an SPL token
-//! into the pool's vault and publishes a commitment, a hash of a secret it keeps.
-//! Later the note leaves the vault to a fresh account, submitted by a relayer, so
-//! the depositor's key never signs the withdrawal. The chain shows
+//! into the vault and publishes a commitment, a hash of a secret it keeps. Later
+//! the note leaves the vault to a fresh account, submitted by a relayer, so the
+//! depositor's key never signs the withdrawal. The chain shows
 //! `relayer -> vault -> clean account`; every note is the same size, so neither
 //! the amount nor the signer says which approved depositor it was. Entry is
 //! attributable and auditable, exit is authorized but unlinked.
@@ -17,87 +17,100 @@
 //! membership is proven with riverrun's post-quantum Circle-STARK "crowd" proofs,
 //! whose public inputs carry a blinded commitment instead of the leaf.
 //!
-//! ## What is trusted, named
+//! ## No committee, no published root
 //!
-//! Those STARKs are 100+ KB and one verification costs more than a Solana
-//! transaction's compute cap, so this program does not run them. A committee of
-//! `N` verifier keys checks the proof off-chain and `M` of them sign an Ed25519
-//! attestation over the exact `(pool, root, nullifier, recipient)` being settled;
-//! the program checks the signatures through the native precompile and
-//! instruction introspection. What that trusts: `M` colluding verifiers could
-//! approve a withdrawal no proof backs (soundness). What it does not trust: the
-//! committee for privacy. The proof hides the leaf, so a verifier learns the
-//! nullifier and the recipient, never which deposit it was.
+//! This version trusts no signer for soundness. Two things used to be a
+//! committee's job, and both are on chain now:
 //!
-//! The committee is fixed when the pool opens: there is no instruction to
-//! replace it, because an authority that could swap in its own keys could sign
-//! every note out. Rotation means a new pool. The membership root is published
-//! by the operator (a Poseidon2-M31 tree is not yet computed on-chain here), and
-//! an honest verifier recomputes it from the on-chain deposit records before
-//! signing, so a root over leaves nobody deposited gets no quorum. The operator
-//! is trusted for liveness and for the allowlist, not for custody. Staged
-//! on-chain STARK verification is the roadmap that removes the committee.
+//! - **The root.** Every deposit is folded into a depth-127 Poseidon2-M31 tree
+//!   held in a program account (`insert`, permissionless, a few transactions per
+//!   deposit because one fold costs more than a transaction's compute cap). The
+//!   operator cannot publish a root over leaves nobody deposited, because nobody
+//!   publishes roots: a withdrawal must name one this program computed.
+//! - **The proof.** A withdrawal reads a buffer account owned by the riverrun
+//!   M31 verifier program ([`VERIFIER_ID`]) that verified both crowd proofs on
+//!   chain, staged across transactions, recipient-bound, and marked the buffer
+//!   settleable. The pool checks the owner, the settleable mark, the kind, and
+//!   that every public input matches this pool: action, round, root, nullifier,
+//!   recipient.
+//!
+//! So spending a note needs no elliptic-curve signature from its owner and no
+//! committee: authority is knowledge of the note's secret, proven with a
+//! hash-only STARK. What remains trusted is named: the two programs' code and
+//! their upgrade authorities, and the operator for the allowlist (who may
+//! deposit), not for custody.
 //!
 //! ## Exit and withdraw are one spend
 //!
-//! A depositor can always reclaim their note (`ragequit`), but an exit must burn
-//! the same nullifier a withdrawal would, otherwise "withdraw privately, then
-//! ragequit the deposit" pays the note twice out of everyone else's money. So an
-//! exit reveals the note's nullifier and carries a committee attestation that it
-//! belongs to this commitment, and the nullifier PDA is the single spent-flag for
-//! both paths.
+//! A depositor can reclaim their note in public (`exit`), but an exit must burn
+//! the same nullifier a withdrawal would, otherwise "withdraw privately, then exit
+//! the deposit" pays the note twice out of everyone else's money. An exit reveals
+//! the note's secret; the program recomputes the leaf and the nullifier from it
+//! with the same permutation the prover uses, and the nullifier PDA is the single
+//! spent-flag for both paths. The refund can only go to the depositor's own
+//! token account, so revealing the secret to trigger it gives nobody else money.
 
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, TransferChecked};
-use solana_instructions_sysvar::{load_current_index_checked, load_instruction_at_checked};
-use solana_sdk_ids::ed25519_program;
+use riverrun_m31::{compress, permute, CONTEXT_LEN, DIGEST_LEN, SECRET_LEN, WIDTH};
 
-declare_id!("AsQwEN7XiUPW2MGHEbEkh8UCKixwpSBfE1KKt5QVgYgx");
+mod empty;
+pub use empty::EMPTY;
 
-/// Domain separators, so an attestation for one path can never be replayed as
-/// the other, or as anything else the verifier keys sign.
-const WITHDRAW_DOMAIN: &[u8; 16] = b"vineland-wdrw-v1";
-const EXIT_DOMAIN: &[u8; 16] = b"vineland-exit-v1";
-/// domain(16) + pool(32) + root(32) + nullifier(32) + recipient(32). Binding the
-/// recipient token account is what stops a relayer from redirecting the payout.
-const WITHDRAW_MSG_LEN: usize = 144;
-/// domain(16) + pool(32) + commitment(32) + nullifier(32).
-const EXIT_MSG_LEN: usize = 112;
+declare_id!("3W1FD5Q1ELFzVAoJUasSj3aZGmgs4zrRdgfZZV1K5VXi");
 
-/// Cap on the committee size (riverrun's Wake's Four, generalized to M-of-N).
-const MAX_VERIFIERS: usize = 8;
+/// The riverrun M31 staged verifier (`programs/riverrun-m31-verifier` in
+/// mirror-pool at ce5e8c7). Fixed in code: an operator who could name the
+/// verifier could name one that finalizes anything.
+pub const VERIFIER_ID: Pubkey = pubkey!("8vPHUTH27WXYNvNoaBTJGWWceNSVrNXHZSTYkaywkcYo");
+
+/// Depth of riverrun's crowd membership tree (`riverrun_m31::CROWD_DEPTH`).
+pub const DEPTH: usize = 127;
+/// Recent roots a withdrawal may name, so a deposit landing between proving and
+/// settling does not invalidate the proof.
+pub const ROOT_HISTORY: usize = 16;
+
 /// The protocol fee is charged on withdrawal only and capped here, so a pool
 /// cannot be initialized to confiscate notes.
 const MAX_FEE_BPS: u16 = 1_000;
 
-/// Layout of a native Ed25519 instruction's data (one signature): a 16-byte
-/// header, then the public key, the signature, and the message.
-const ED25519_HEADER_LEN: usize = 16;
-const ED25519_PUBKEY_OFFSET: usize = ED25519_HEADER_LEN;
-const ED25519_SIGNATURE_OFFSET: usize = ED25519_PUBKEY_OFFSET + 32;
-const ED25519_MESSAGE_OFFSET: usize = ED25519_SIGNATURE_OFFSET + 64;
+// Verifier buffer layout (`riverrun-m31-verifier/src/staged.rs`, ce5e8c7).
+const B_FINALIZED: usize = 40;
+const B_ROOT: usize = 41;
+const B_NULLIFIER: usize = 73;
+const B_ROUND: usize = 105;
+const B_ACTION: usize = 121;
+const B_RECIPIENT: usize = 153;
+const B_VERSION: usize = 185;
+const B_KIND: usize = 186;
+/// Where proof bytes start; any real buffer is at least this long.
+const B_PROOFS: usize = 2432;
+/// `FINAL_SETTLEABLE`: both crowd proofs verified, recipient-bound.
+const FINAL_SETTLEABLE: u8 = 1;
+/// `KIND_CROWD | KIND_BOUND`, the only kind a pool should accept.
+const KIND_CROWD_BOUND: u8 = 0x83;
+
+/// Domain of the leaf context (`client::note_action`).
+const NOTE_DOMAIN: &[u8] = b"vineland/note/v1";
+/// Domain of the nullifier context (`client::spend_round_u64`). v2: the verifier
+/// accepts a round only as a u64 in 16-bit limbs, so the context is a u64.
+const SPEND_DOMAIN: &[u8] = b"vineland/spend/v2";
 
 #[program]
 pub mod vineland_pool {
     use super::*;
 
-    /// Open a pool for one SPL mint and one note size, with a verifier committee,
-    /// a protocol fee in basis points (paid to `treasury` on withdrawal), and an
-    /// anonymity floor `k_min` below which no withdrawal settles.
-    pub fn initialize(
-        ctx: Context<Initialize>,
-        verifiers: Vec<Pubkey>,
-        threshold: u8,
-        note_amount: u64,
-        fee_bps: u16,
-        k_min: u32,
-    ) -> Result<()> {
-        validate_committee(&verifiers, threshold)?;
+    /// Open a pool for one SPL mint and one note size, with a protocol fee in
+    /// basis points (paid to `treasury` on withdrawal) and an anonymity floor
+    /// `k_min` below which no withdrawal settles. The note's contexts are derived
+    /// here from the pool's own address, so nobody chooses them.
+    pub fn initialize(ctx: Context<Initialize>, note_amount: u64, fee_bps: u16, k_min: u32) -> Result<()> {
         require!(note_amount > 0, PoolError::InvalidConfig);
         require!(fee_bps <= MAX_FEE_BPS, PoolError::InvalidConfig);
         require!(fee_of(note_amount, fee_bps) < note_amount, PoolError::InvalidConfig);
         require!(k_min >= 1, PoolError::InvalidConfig);
 
+        let key = ctx.accounts.pool.key();
         let pool = &mut ctx.accounts.pool;
         pool.authority = ctx.accounts.authority.key();
         pool.mint = ctx.accounts.mint.key();
@@ -105,15 +118,15 @@ pub mod vineland_pool {
         pool.note_amount = note_amount;
         pool.fee_bps = fee_bps;
         pool.k_min = k_min;
-        pool.verifiers = verifiers;
-        pool.threshold = threshold;
-        pool.membership_root = [0u8; 32];
-        pool.root_set_size = 0;
+        pool.action = note_action(&key);
+        pool.round = spend_round_u64(&key);
         pool.leaf_count = 0;
         pool.live_notes = 0;
         pool.exits = 0;
         pool.bump = ctx.bumps.pool;
         pool.vault_bump = ctx.bumps.vault;
+        pool.tree_bump = ctx.bumps.tree;
+        ctx.accounts.tree.load_init()?;
         Ok(())
     }
 
@@ -131,25 +144,11 @@ pub mod vineland_pool {
         Ok(())
     }
 
-    /// Publish the membership root withdrawals are proven against, and how many
-    /// deposited leaves it covers. Authority-gated (see the module docs). The
-    /// size cannot exceed the deposits that exist, so the floor below is a floor
-    /// on real deposits, not on a number the operator types.
-    pub fn publish_root(ctx: Context<Admin>, root: [u8; 32], set_size: u32) -> Result<()> {
-        require!(root != [0u8; 32], PoolError::RootNotPublished);
-        require!(is_canonical_m31(&root), PoolError::NonCanonical);
-        let pool = &mut ctx.accounts.pool;
-        require!(set_size <= pool.leaf_count, PoolError::InvalidSetSize);
-        pool.membership_root = root;
-        pool.root_set_size = set_size;
-        emit!(RootPublished { pool: pool.key(), root, set_size });
-        Ok(())
-    }
-
     /// Deposit one note. Only an approved key may, and the entry is public on
     /// purpose: the depositor signs, the amount is the pool's fixed note, and the
     /// commitment is recorded against the depositor so they can always exit.
-    /// A commitment can be deposited once (its record is a PDA).
+    /// A commitment can be deposited once (its record is a PDA). The leaf joins
+    /// the tree through `insert`.
     pub fn deposit(ctx: Context<Deposit>, commitment: [u8; 32]) -> Result<()> {
         require!(commitment != [0u8; 32], PoolError::InvalidCommitment);
         require!(is_canonical_m31(&commitment), PoolError::NonCanonical);
@@ -185,30 +184,85 @@ pub mod vineland_pool {
         Ok(())
     }
 
-    /// Withdraw one note to `recipient`, submitted by any relayer. Requires a
-    /// committee quorum over exactly `(pool, root, nullifier, recipient)`, the
-    /// current root, a root covering at least `k_min` deposits, and a nullifier
-    /// never spent before (its PDA is created here; a second spend finds it).
-    /// Pays `note - fee` to the recipient and `fee` to the treasury.
-    pub fn withdraw(ctx: Context<Withdraw>, nullifier: [u8; 32], root: [u8; 32]) -> Result<()> {
+    /// Fold the next deposit into the tree, at most `max_levels` levels per call
+    /// (one level is one Poseidon2-M31 compression, about 21k CU). Anyone may
+    /// call it; leaves enter strictly in deposit order. When the fold reaches the
+    /// top, the new root (covering every leaf up to this one) joins the history.
+    pub fn insert(ctx: Context<Insert>, max_levels: u8) -> Result<()> {
+        require!(max_levels > 0, PoolError::InvalidConfig);
+        let record = &ctx.accounts.deposit_record;
+        let tree = &mut ctx.accounts.tree.load_mut()?;
+        require!(record.index == tree.inserted, PoolError::OutOfOrder);
+
+        let index = record.index as u64;
+        let start = tree.level as usize;
+        if start == 0 {
+            tree.node = record.commitment;
+        }
+        let end = core::cmp::min(start + max_levels as usize, DEPTH);
+        let mut node = limbs(&tree.node);
+        for level in start..end {
+            let right = level < 64 && (index >> level) & 1 == 1;
+            if right {
+                node = compress(limbs(&tree.filled[level]), node);
+            } else {
+                tree.filled[level] = bytes(&node);
+                node = compress(node, limbs(&EMPTY[level]));
+            }
+        }
+        tree.node = bytes(&node);
+        tree.level = end as u32;
+
+        if end == DEPTH {
+            let size = record.index + 1;
+            let slot = (tree.next_root as usize) % ROOT_HISTORY;
+            tree.roots[slot] = tree.node;
+            tree.root_sizes[slot] = size;
+            tree.next_root = tree.next_root.wrapping_add(1);
+            tree.inserted = size;
+            tree.level = 0;
+            emit!(RootComputed { pool: ctx.accounts.pool.key(), root: tree.node, set_size: size });
+        }
+        Ok(())
+    }
+
+    /// Withdraw one note to `recipient`, submitted by any relayer. Authorized by
+    /// a verifier buffer in which both crowd proofs verified on chain, bound to
+    /// this recipient, against a root this program computed, with this pool's
+    /// contexts and this nullifier. The root must cover at least `k_min` notes
+    /// still in the set, and the nullifier must never have been spent (its PDA is
+    /// created here; a second spend finds it). Pays `note - fee` to the
+    /// recipient and `fee` to the treasury.
+    pub fn withdraw(ctx: Context<Withdraw>, nullifier: [u8; 32]) -> Result<()> {
         require!(is_canonical_m31(&nullifier), PoolError::NonCanonical);
         let pool = &ctx.accounts.pool;
-        require!(pool.membership_root != [0u8; 32], PoolError::RootNotPublished);
-        require!(root == pool.membership_root, PoolError::RootMismatch);
+        let root = {
+            let buf = ctx.accounts.proof.try_borrow_data()?;
+            require!(buf.len() >= B_PROOFS, PoolError::ProofNotVerified);
+            require!(
+                buf[B_VERSION] == 1 && buf[B_FINALIZED] == FINAL_SETTLEABLE && buf[B_KIND] == KIND_CROWD_BOUND,
+                PoolError::ProofNotVerified
+            );
+            require!(buf[B_NULLIFIER..B_NULLIFIER + 32] == nullifier, PoolError::ProofMismatch);
+            require!(buf[B_ACTION..B_ACTION + 32] == pool.action, PoolError::ProofMismatch);
+            require!(buf[B_ROUND..B_ROUND + 16] == (pool.round as u128).to_le_bytes(), PoolError::ProofMismatch);
+            require!(
+                buf[B_RECIPIENT..B_RECIPIENT + 32] == ctx.accounts.recipient.key().to_bytes(),
+                PoolError::ProofMismatch
+            );
+            let mut root = [0u8; 32];
+            root.copy_from_slice(&buf[B_ROOT..B_ROOT + 32]);
+            root
+        };
+
+        let size = {
+            let tree = ctx.accounts.tree.load()?;
+            tree.size_of(&root).ok_or(PoolError::UnknownRoot)?
+        };
         // A set of one is not an anonymity set: the payout belongs to that
         // depositor by elimination. An exit is public (it reveals which
         // commitment left), so exited notes do not count toward the set.
-        require!(
-            pool.root_set_size.saturating_sub(pool.exits) >= pool.k_min,
-            PoolError::AnonymitySetTooSmall
-        );
-
-        verify_quorum(
-            &ctx.accounts.instructions,
-            &pool.verifiers,
-            pool.threshold,
-            &withdraw_message(&pool.key(), &root, &nullifier, &ctx.accounts.recipient.key()),
-        )?;
+        require!(size.saturating_sub(pool.exits) >= pool.k_min, PoolError::AnonymitySetTooSmall);
 
         let note = pool.note_amount;
         let fee = fee_of(note, pool.fee_bps);
@@ -231,34 +285,28 @@ pub mod vineland_pool {
             )?;
         }
 
-        let record = &mut ctx.accounts.nullifier_record;
-        record.bump = ctx.bumps.nullifier_record;
+        ctx.accounts.nullifier_record.bump = ctx.bumps.nullifier_record;
         let pool = &mut ctx.accounts.pool;
         pool.live_notes = pool.live_notes.checked_sub(1).ok_or(PoolError::VaultAccounting)?;
 
-        emit!(Withdrawn {
-            pool: pool.key(),
-            nullifier,
-            recipient: ctx.accounts.recipient.key(),
-        });
+        emit!(Withdrawn { pool: pool.key(), nullifier, recipient: ctx.accounts.recipient.key() });
         Ok(())
     }
 
-    /// The depositor reclaims their own note in full, to their own token
-    /// account. They leave the anonymity set publicly. The exit burns the note's
-    /// nullifier, with a committee attestation that the nullifier belongs to this
-    /// commitment, so a note that was withdrawn cannot also be exited, and an
-    /// exited note cannot also be withdrawn.
-    pub fn ragequit(ctx: Context<Ragequit>, commitment: [u8; 32], nullifier: [u8; 32]) -> Result<()> {
+    /// Reclaim a note in full, to the depositor's own token account, by revealing
+    /// its secret. The program recomputes the leaf (must be this deposit's
+    /// commitment) and the nullifier (must be the one named, whose PDA is created
+    /// here), so a withdrawn note cannot also exit and an exited note cannot also
+    /// be withdrawn. Anyone may submit it; the money can only go to the depositor.
+    pub fn exit(ctx: Context<Exit>, secret: [u8; 32], nullifier: [u8; 32]) -> Result<()> {
         require!(!ctx.accounts.deposit_record.exited, PoolError::AlreadyExited);
-        require!(is_canonical_m31(&nullifier), PoolError::NonCanonical);
+        require!(is_canonical_m31(&secret), PoolError::NonCanonical);
         let pool = &ctx.accounts.pool;
-        verify_quorum(
-            &ctx.accounts.instructions,
-            &pool.verifiers,
-            pool.threshold,
-            &exit_message(&pool.key(), &commitment, &nullifier),
-        )?;
+        let s = limbs(&secret);
+        let leaf = bytes(&digest(&s, limbs(&pool.action)));
+        require!(leaf == ctx.accounts.deposit_record.commitment, PoolError::SecretMismatch);
+        let spent = bytes(&digest(&s, round_limbs(pool.round)));
+        require!(spent == nullifier, PoolError::SecretMismatch);
 
         pay_from_vault(
             pool,
@@ -269,6 +317,7 @@ pub mod vineland_pool {
             pool.note_amount,
         )?;
 
+        let commitment = ctx.accounts.deposit_record.commitment;
         ctx.accounts.deposit_record.exited = true;
         ctx.accounts.nullifier_record.bump = ctx.bumps.nullifier_record;
         let pool = &mut ctx.accounts.pool;
@@ -295,6 +344,58 @@ pub fn is_canonical_m31(digest: &[u8; 32]) -> bool {
 /// The fee on one note, rounded down, computed in u128 so no note size overflows.
 pub fn fee_of(note_amount: u64, fee_bps: u16) -> u64 {
     ((note_amount as u128 * fee_bps as u128) / 10_000) as u64
+}
+
+fn limbs(b: &[u8; 32]) -> [u64; DIGEST_LEN] {
+    core::array::from_fn(|i| u32::from_le_bytes([b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]]) as u64)
+}
+
+fn bytes(d: &[u64; DIGEST_LEN]) -> [u8; 32] {
+    let mut b = [0u8; 32];
+    for (i, v) in d.iter().enumerate() {
+        b[4 * i..4 * i + 4].copy_from_slice(&(*v as u32).to_le_bytes());
+    }
+    b
+}
+
+/// `permute(secret ‖ context)[0..8]`: the leaf (context = action) or the
+/// nullifier (context = round), exactly as `client::Note` derives them.
+fn digest(secret: &[u64; SECRET_LEN], context: [u64; CONTEXT_LEN]) -> [u64; DIGEST_LEN] {
+    let mut input = [0u64; WIDTH];
+    input[..SECRET_LEN].copy_from_slice(secret);
+    input[SECRET_LEN..].copy_from_slice(&context);
+    let out = permute(input);
+    core::array::from_fn(|i| out[i])
+}
+
+/// Eight M31 limbs from a domain-separated SHA-256 of the pool address (the
+/// leaf context, `client::note_action`).
+pub fn note_action(pool: &Pubkey) -> [u8; 32] {
+    let h = solana_sha256_hasher::hashv(&[NOTE_DOMAIN, pool.as_ref()]).to_bytes();
+    let mut out = [0u8; 32];
+    for i in 0..8 {
+        let mut v = u32::from_le_bytes([h[4 * i], h[4 * i + 1], h[4 * i + 2], h[4 * i + 3]]) & M31_P;
+        if v == M31_P {
+            v = 0;
+        }
+        out[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    out
+}
+
+/// The nullifier context as a u64 (`client::spend_round_u64`).
+pub fn spend_round_u64(pool: &Pubkey) -> u64 {
+    let h = solana_sha256_hasher::hashv(&[SPEND_DOMAIN, pool.as_ref()]).to_bytes();
+    u64::from_le_bytes([h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]])
+}
+
+/// The verifier's round encoding: four 16-bit limbs, then zeros.
+pub fn round_limbs(round: u64) -> [u64; CONTEXT_LEN] {
+    let mut r = [0u64; CONTEXT_LEN];
+    for (i, limb) in r.iter_mut().take(4).enumerate() {
+        *limb = (round >> (16 * i)) & 0xffff;
+    }
+    r
 }
 
 /// Move `amount` out of the vault, signed by the pool PDA (the vault's
@@ -324,109 +425,6 @@ fn pay_from_vault<'info>(
     )
 }
 
-pub fn withdraw_message(
-    pool: &Pubkey,
-    root: &[u8; 32],
-    nullifier: &[u8; 32],
-    recipient: &Pubkey,
-) -> [u8; WITHDRAW_MSG_LEN] {
-    let mut m = [0u8; WITHDRAW_MSG_LEN];
-    m[..16].copy_from_slice(WITHDRAW_DOMAIN);
-    m[16..48].copy_from_slice(pool.as_ref());
-    m[48..80].copy_from_slice(root);
-    m[80..112].copy_from_slice(nullifier);
-    m[112..144].copy_from_slice(recipient.as_ref());
-    m
-}
-
-pub fn exit_message(pool: &Pubkey, commitment: &[u8; 32], nullifier: &[u8; 32]) -> [u8; EXIT_MSG_LEN] {
-    let mut m = [0u8; EXIT_MSG_LEN];
-    m[..16].copy_from_slice(EXIT_DOMAIN);
-    m[16..48].copy_from_slice(pool.as_ref());
-    m[48..80].copy_from_slice(commitment);
-    m[80..112].copy_from_slice(nullifier);
-    m
-}
-
-/// At least one verifier, no more than the cap, a threshold in `1..=N`, and no
-/// duplicate keys (a duplicate would let one key count twice).
-fn validate_committee(verifiers: &[Pubkey], threshold: u8) -> Result<()> {
-    let n = verifiers.len();
-    require!((1..=MAX_VERIFIERS).contains(&n), PoolError::InvalidCommittee);
-    require!(threshold >= 1 && (threshold as usize) <= n, PoolError::InvalidCommittee);
-    for i in 0..n {
-        for j in (i + 1)..n {
-            require_keys_neq!(verifiers[i], verifiers[j], PoolError::InvalidCommittee);
-        }
-    }
-    Ok(())
-}
-
-/// If `ix` is a self-contained native Ed25519 sigverify instruction over exactly
-/// `expected`, return the signer's key. The signature itself is checked by the
-/// precompile (if the transaction executes, it is valid); what is checked here is
-/// that the precompile was asked about this message, with the key and message
-/// inside its own data (source index `0xFFFF`) rather than read from elsewhere.
-fn attestation_signer(
-    ix: &anchor_lang::solana_program::instruction::Instruction,
-    expected: &[u8],
-) -> Option<[u8; 32]> {
-    if ix.program_id != ed25519_program::ID {
-        return None;
-    }
-    let data = &ix.data;
-    let mlen = expected.len();
-    if data.len() != ED25519_MESSAGE_OFFSET + mlen {
-        return None;
-    }
-    if data[0] != 1 || data[1] != 0 {
-        return None;
-    }
-    let field = |at: usize| u16::from_le_bytes([data[at], data[at + 1]]);
-    let self_contained = field(2) as usize == ED25519_SIGNATURE_OFFSET
-        && field(6) as usize == ED25519_PUBKEY_OFFSET
-        && field(10) as usize == ED25519_MESSAGE_OFFSET
-        && field(12) as usize == mlen
-        && field(4) == u16::MAX
-        && field(8) == u16::MAX
-        && field(14) == u16::MAX;
-    if !self_contained || &data[ED25519_MESSAGE_OFFSET..] != expected {
-        return None;
-    }
-    let mut signer = [0u8; 32];
-    signer.copy_from_slice(&data[ED25519_PUBKEY_OFFSET..ED25519_PUBKEY_OFFSET + 32]);
-    Some(signer)
-}
-
-/// Require attestations over `expected` from at least `threshold` distinct
-/// committee members among the instructions that precede this one.
-fn verify_quorum(
-    instructions: &UncheckedAccount,
-    verifiers: &[Pubkey],
-    threshold: u8,
-    expected: &[u8],
-) -> Result<()> {
-    let index = load_current_index_checked(instructions)?;
-    let mut counted = [false; MAX_VERIFIERS];
-    let mut have = 0u8;
-    for i in 0..index {
-        let Ok(ix) = load_instruction_at_checked(i as usize, instructions) else {
-            continue;
-        };
-        let Some(signer) = attestation_signer(&ix, expected) else {
-            continue;
-        };
-        if let Some(slot) = verifiers.iter().position(|v| v.as_ref() == signer) {
-            if !counted[slot] {
-                counted[slot] = true;
-                have += 1;
-            }
-        }
-    }
-    require!(have >= threshold, PoolError::NotEnoughAttestations);
-    Ok(())
-}
-
 #[account]
 pub struct Pool {
     pub authority: Pubkey,
@@ -437,27 +435,52 @@ pub struct Pool {
     /// amount leaving the vault says nothing about who deposited it.
     pub note_amount: u64,
     pub fee_bps: u16,
-    /// Withdrawals are refused while the published root covers fewer deposits.
+    /// Withdrawals are refused while the named root covers fewer live notes.
     pub k_min: u32,
-    pub verifiers: Vec<Pubkey>,
-    pub threshold: u8,
-    pub membership_root: [u8; 32],
-    /// How many deposited leaves `membership_root` covers (<= `leaf_count`).
-    pub root_set_size: u32,
+    /// Leaf context, eight M31 limbs, derived from this pool's address.
+    pub action: [u8; 32],
+    /// Nullifier context, derived from this pool's address.
+    pub round: u64,
     /// Deposits ever made: the next leaf index. Append-only.
     pub leaf_count: u32,
     /// Notes still in the vault: deposits minus withdrawals minus exits. The
     /// vault holds exactly `live_notes * note_amount` unless someone donates.
     pub live_notes: u32,
-    /// Notes that left through `ragequit`, publicly linked to their commitment.
+    /// Notes that left through `exit`, publicly linked to their commitment.
     pub exits: u32,
     pub bump: u8,
     pub vault_bump: u8,
+    pub tree_bump: u8,
 }
 
 impl Pool {
-    pub const SPACE: usize =
-        8 + 32 + 32 + 32 + 8 + 2 + 4 + (4 + MAX_VERIFIERS * 32) + 1 + 32 + 4 + 4 + 4 + 4 + 1 + 1;
+    pub const SPACE: usize = 8 + 32 + 32 + 32 + 8 + 2 + 4 + 32 + 8 + 4 + 4 + 4 + 1 + 1 + 1;
+}
+
+/// The deposit tree, folded on chain. `filled[l]` is the last left node seen at
+/// level `l` (the classic incremental Merkle frontier); `node` and `level` hold
+/// a fold in progress, since one fold spans several transactions.
+#[account(zero_copy)]
+pub struct Tree {
+    pub filled: [[u8; 32]; DEPTH],
+    pub roots: [[u8; 32]; ROOT_HISTORY],
+    pub root_sizes: [u32; ROOT_HISTORY],
+    pub node: [u8; 32],
+    /// Leaves fully folded in: the index of the next leaf to fold.
+    pub inserted: u32,
+    /// Next level of the fold in progress; 0 when none is in progress.
+    pub level: u32,
+    pub next_root: u32,
+    pub _reserved: u32,
+}
+
+impl Tree {
+    pub const SPACE: usize = 8 + core::mem::size_of::<Tree>();
+
+    /// How many leaves `root` covers, if it is one of the recent roots.
+    pub fn size_of(&self, root: &[u8; 32]) -> Option<u32> {
+        (0..ROOT_HISTORY).find(|&i| self.root_sizes[i] > 0 && &self.roots[i] == root).map(|i| self.root_sizes[i])
+    }
 }
 
 /// Existence is the approval.
@@ -508,6 +531,14 @@ pub struct Initialize<'info> {
         bump
     )]
     pub pool: Account<'info, Pool>,
+    #[account(
+        init,
+        payer = authority,
+        space = Tree::SPACE,
+        seeds = [b"tree", pool.key().as_ref()],
+        bump
+    )]
+    pub tree: AccountLoader<'info, Tree>,
     pub mint: Account<'info, Mint>,
     #[account(
         init,
@@ -524,18 +555,6 @@ pub struct Initialize<'info> {
     pub authority: Signer<'info>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
-}
-
-#[derive(Accounts)]
-pub struct Admin<'info> {
-    #[account(
-        mut,
-        seeds = [b"pool", authority.key().as_ref(), pool.mint.as_ref()],
-        bump = pool.bump,
-        has_one = authority
-    )]
-    pub pool: Account<'info, Pool>,
-    pub authority: Signer<'info>,
 }
 
 #[derive(Accounts)]
@@ -616,6 +635,20 @@ pub struct Deposit<'info> {
 }
 
 #[derive(Accounts)]
+pub struct Insert<'info> {
+    #[account(seeds = [b"pool", pool.authority.as_ref(), pool.mint.as_ref()], bump = pool.bump)]
+    pub pool: Account<'info, Pool>,
+    #[account(mut, seeds = [b"tree", pool.key().as_ref()], bump = pool.tree_bump)]
+    pub tree: AccountLoader<'info, Tree>,
+    /// The leaf being folded; its seeds tie it to this pool.
+    #[account(
+        seeds = [b"deposit", pool.key().as_ref(), deposit_record.commitment.as_ref()],
+        bump = deposit_record.bump
+    )]
+    pub deposit_record: Account<'info, DepositRecord>,
+}
+
+#[derive(Accounts)]
 #[instruction(nullifier: [u8; 32])]
 pub struct Withdraw<'info> {
     #[account(
@@ -624,6 +657,12 @@ pub struct Withdraw<'info> {
         bump = pool.bump
     )]
     pub pool: Account<'info, Pool>,
+    #[account(seeds = [b"tree", pool.key().as_ref()], bump = pool.tree_bump)]
+    pub tree: AccountLoader<'info, Tree>,
+    /// CHECK: a buffer of the riverrun M31 verifier; only that program can write
+    /// it, and every field read is checked against this pool in `withdraw`.
+    #[account(owner = VERIFIER_ID @ PoolError::ProofNotVerified)]
+    pub proof: UncheckedAccount<'info>,
     /// `init` is the anti-replay: a spent nullifier already has this account.
     #[account(
         init,
@@ -637,7 +676,7 @@ pub struct Withdraw<'info> {
     pub mint: Account<'info, Mint>,
     #[account(mut, seeds = [b"vault", pool.key().as_ref()], bump = pool.vault_bump)]
     pub vault: Account<'info, TokenAccount>,
-    /// Bound into the attestation, so the relayer cannot swap it.
+    /// Bound into the proofs, so the relayer cannot swap it.
     #[account(
         mut,
         token::mint = pool.mint,
@@ -651,14 +690,11 @@ pub struct Withdraw<'info> {
     pub relayer: Signer<'info>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
-    /// CHECK: address-checked; read only through the instructions-sysvar helpers.
-    #[account(address = solana_sdk_ids::sysvar::instructions::ID)]
-    pub instructions: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
-#[instruction(commitment: [u8; 32], nullifier: [u8; 32])]
-pub struct Ragequit<'info> {
+#[instruction(secret: [u8; 32], nullifier: [u8; 32])]
+pub struct Exit<'info> {
     #[account(
         mut,
         seeds = [b"pool", pool.authority.as_ref(), pool.mint.as_ref()],
@@ -667,14 +703,13 @@ pub struct Ragequit<'info> {
     pub pool: Account<'info, Pool>,
     #[account(
         mut,
-        seeds = [b"deposit", pool.key().as_ref(), commitment.as_ref()],
-        bump = deposit_record.bump,
-        has_one = depositor @ PoolError::NotDepositor
+        seeds = [b"deposit", pool.key().as_ref(), deposit_record.commitment.as_ref()],
+        bump = deposit_record.bump
     )]
     pub deposit_record: Account<'info, DepositRecord>,
     #[account(
         init,
-        payer = depositor,
+        payer = payer,
         space = NullifierRecord::SPACE,
         seeds = [b"nullifier", pool.key().as_ref(), nullifier.as_ref()],
         bump
@@ -685,15 +720,17 @@ pub struct Ragequit<'info> {
     #[account(mut, seeds = [b"vault", pool.key().as_ref()], bump = pool.vault_bump)]
     pub vault: Account<'info, TokenAccount>,
     /// The refund goes to an account the depositor owns, nowhere else.
-    #[account(mut, token::mint = pool.mint, token::authority = depositor)]
+    #[account(
+        mut,
+        token::mint = pool.mint,
+        constraint = depositor_token.owner == deposit_record.depositor @ PoolError::NotDepositorAccount
+    )]
     pub depositor_token: Account<'info, TokenAccount>,
+    /// Whoever submits the exit pays the nullifier record's rent.
     #[account(mut)]
-    pub depositor: Signer<'info>,
+    pub payer: Signer<'info>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
-    /// CHECK: address-checked; read only through the instructions-sysvar helpers.
-    #[account(address = solana_sdk_ids::sysvar::instructions::ID)]
-    pub instructions: UncheckedAccount<'info>,
 }
 
 #[event]
@@ -701,6 +738,13 @@ pub struct Deposited {
     pub pool: Pubkey,
     pub commitment: [u8; 32],
     pub index: u32,
+}
+
+#[event]
+pub struct RootComputed {
+    pub pool: Pubkey,
+    pub root: [u8; 32],
+    pub set_size: u32,
 }
 
 #[event]
@@ -717,35 +761,28 @@ pub struct Exited {
     pub nullifier: [u8; 32],
 }
 
-#[event]
-pub struct RootPublished {
-    pub pool: Pubkey,
-    pub root: [u8; 32],
-    pub set_size: u32,
-}
-
 #[error_code]
 pub enum PoolError {
     #[msg("note size, fee or floor is out of range")]
     InvalidConfig,
-    #[msg("the verifier committee is empty, too large, has a bad threshold, or has duplicates")]
-    InvalidCommittee,
-    #[msg("fewer than the required threshold of committee verifiers attested this exact spend")]
-    NotEnoughAttestations,
-    #[msg("the pool has not published a membership root yet")]
-    RootNotPublished,
-    #[msg("the withdrawal's root is not the pool's current root")]
-    RootMismatch,
-    #[msg("the root covers more deposits than exist")]
-    InvalidSetSize,
+    #[msg("the proof buffer is not a finalized, recipient-bound crowd verification by the riverrun verifier")]
+    ProofNotVerified,
+    #[msg("the verified proof is for another pool, nullifier or recipient")]
+    ProofMismatch,
+    #[msg("the proof's root is not one this pool computed recently")]
+    UnknownRoot,
+    #[msg("leaves enter the tree in deposit order")]
+    OutOfOrder,
     #[msg("the anonymity set is below the pool's floor: a withdrawal here would not be private")]
     AnonymitySetTooSmall,
     #[msg("a commitment cannot be all zeros")]
     InvalidCommitment,
     #[msg("the recipient cannot be the vault")]
     InvalidRecipient,
-    #[msg("only the original depositor can exit this note")]
-    NotDepositor,
+    #[msg("the revealed secret does not open this deposit or this nullifier")]
+    SecretMismatch,
+    #[msg("an exit refunds only to a token account the depositor owns")]
+    NotDepositorAccount,
     #[msg("this note already exited")]
     AlreadyExited,
     #[msg("the pool is full")]

@@ -21,13 +21,28 @@ anchor-lang = "=1.1.2"
 # token_2022 only because anchor's `init` codegen for token accounts names
 # token_interface; the program itself accepts classic SPL Token mints only.
 anchor-spl = { version = "=1.1.2", default-features = false, features = ["token", "token_2022"] }
-# instruction introspection for the committee attestation (same check as
-# riverrun's mirror-pool program)
-solana-instructions-sysvar = "3"
-solana-sdk-ids = "3"
+# riverrun's Poseidon2-M31 permutation, the same code the prover uses, so the
+# on-chain tree and the exit's leaf/nullifier recomputation cannot drift from
+# the client (github.com/Galmanus/mirror-pool, branch feat/staged-onchain-verifier).
+riverrun-m31 = { path = "../../../mirror-pool/.claude/worktrees/agent-ae0080ba263a865c1/crates/riverrun-m31", default-features = false }
+solana-sha256-hasher = "3"
+# the Tree account is zero-copy (4.7 KB, too big for the SBF stack)
+bytemuck = { version = "1", features = ["derive", "min_const_generics"] }
+# Plonky3 instruments functions with tracing callsites, each a named static in
+# its own ELF section that the loader rejects; compile them out (same reason as
+# programs/riverrun-m31-verifier upstream).
+tracing = { version = "0.1", default-features = false, features = ["max_level_off"] }
 
 [dev-dependencies]
 litesvm = "0.6"
 solana-sdk = "2"
 spl-token = "7"
 sha2 = "0.10"
+
+# Cargo applies [patch] only from the build root, so riverrun-m31's own patches
+# are repeated here.
+[patch.crates-io]
+p3-util = { path = "../../../mirror-pool/.claude/worktrees/agent-ae0080ba263a865c1/crates/riverrun-m31/vendor/p3-util-0.6.2-sbf-patch" }
+p3-mersenne-31 = { path = "../../../mirror-pool/.claude/worktrees/agent-ae0080ba263a865c1/crates/riverrun-m31/vendor/p3-mersenne-31-0.6.2-sbf-patch" }
+p3-uni-stark = { path = "../../../mirror-pool/.claude/worktrees/agent-ae0080ba263a865c1/crates/riverrun-m31/vendor/p3-uni-stark-0.6.2-heap-patch" }
+p3-circle = { path = "../../../mirror-pool/.claude/worktrees/agent-ae0080ba263a865c1/crates/riverrun-m31/vendor/p3-circle-0.6.2-cutrace-patch" }

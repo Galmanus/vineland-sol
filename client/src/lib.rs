@@ -15,7 +15,11 @@
 //!   composed by a blinded commitment `C`), so the leaf is in no public input;
 //! - the **committee check** is what an honest verifier runs before signing:
 //!   verify both proofs, and recompute the root from the on-chain deposits rather
-//!   than trusting the root the operator published.
+//!   than trusting the root the operator published;
+//! - the **committee-free withdrawal** binds both proofs to the recipient token
+//!   account and drives them through riverrun's staged on-chain verifier
+//!   ([`prove_withdraw_bound`], [`staged_withdraw_txs`]); the program then reads
+//!   the finalized buffer instead of counting signatures.
 //!
 //! Encoding: a digest is eight canonical M31 limbs, each a u32 LE, 32 bytes. The
 //! program refuses non-canonical limbs; [`enc`] never produces them.
@@ -24,17 +28,23 @@ use std::collections::BTreeMap;
 use std::io::Read;
 
 use riverrun_m31::{
-    compress, permute, prove_binding_crowd, prove_membership_crowd, verify_binding_crowd,
-    verify_crowd, zk::Seed, CrowdBindingProof, CrowdMembershipProof, PathStep, CONTEXT_LEN,
-    CROWD_DEPTH, DIGEST_LEN, SECRET_LEN, WIDTH,
+    compress, permute, prove_binding_crowd, prove_binding_crowd_for, prove_membership_crowd,
+    prove_membership_crowd_for, verify_binding_crowd, verify_crowd, zk::Seed, CrowdBindingProof,
+    CrowdMembershipProof, PathStep, CONTEXT_LEN, CROWD_DEPTH, DIGEST_LEN, SECRET_LEN, WIDTH,
 };
+use riverrun_m31_verifier::{client as staged_client, staged};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use solana_sdk::{
+    compute_budget::ComputeBudgetInstruction,
+    hash::Hash,
     instruction::{AccountMeta, Instruction},
+    message::Message,
     pubkey::Pubkey,
+    rent::Rent,
     signature::{Keypair, Signer},
-    system_program,
+    system_instruction, system_program,
+    transaction::Transaction,
 };
 
 pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("AsQwEN7XiUPW2MGHEbEkh8UCKixwpSBfE1KKt5QVgYgx");
@@ -45,6 +55,10 @@ pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("AsQwEN7XiUPW2MGHEbEkh8UCKixw
 pub const QUERIES: usize = 12;
 pub const LOG_BLOWUP: usize = 7;
 pub const LOG_ROWS: usize = 7;
+
+// The staged verifier hard-codes its parameters; a proof made at any other
+// point never finalizes, so drift is a compile error here, not a failed run.
+const _: () = assert!(QUERIES == staged::NUM_QUERIES && LOG_BLOWUP == staged::LOG_BLOWUP);
 
 pub const M31_P: u64 = (1 << 31) - 1;
 
@@ -82,9 +96,9 @@ fn canonical(d: &Digest8) -> bool {
 }
 
 /// Eight M31 limbs from a domain-separated hash of the pool address. Used for
-/// the per-pool `action` (the leaf's context) and `round` (the nullifier's), so a
-/// note belongs to one pool and has one nullifier. The tiny bias of the mask is
-/// irrelevant: these are public constants, not secrets.
+/// the per-pool `action` (the leaf's context), so a note belongs to one pool.
+/// The tiny bias of the mask is irrelevant: these are public constants, not
+/// secrets.
 fn pool_context(domain: &[u8], pool: &Pubkey) -> [u64; CONTEXT_LEN] {
     let h = Sha256::new().chain_update(domain).chain_update(pool.as_ref()).finalize();
     core::array::from_fn(|i| {
@@ -101,8 +115,20 @@ pub fn note_action(pool: &Pubkey) -> [u64; CONTEXT_LEN] {
     pool_context(b"vineland/note/v1", pool)
 }
 
+/// The per-pool `round` (the nullifier's context), so a note has one nullifier,
+/// as the u64 the staged verifier writes to `B_ROUND` (u128 LE). v2: the
+/// verifier refuses at INIT any round that is not a u64 in 16-bit limbs (see
+/// `staged::round_u64`), which v1's eight hashed limbs never were.
+pub fn spend_round_u64(pool: &Pubkey) -> u64 {
+    let h = Sha256::new().chain_update(b"vineland/spend/v2").chain_update(pool.as_ref()).finalize();
+    u64::from_le_bytes(h[..8].try_into().unwrap())
+}
+
+/// [`spend_round_u64`] as the proof's eight limbs, the verifier's own encoding:
+/// `[r & 0xffff, (r >> 16) & 0xffff, (r >> 32) & 0xffff, r >> 48, 0, 0, 0, 0]`.
 pub fn spend_round(pool: &Pubkey) -> [u64; CONTEXT_LEN] {
-    pool_context(b"vineland/spend/v1", pool)
+    let limbs = staged::round_limbs(spend_round_u64(pool));
+    core::array::from_fn(|i| limbs[i] as u64)
 }
 
 // ---- randomness -------------------------------------------------------------
@@ -164,6 +190,13 @@ impl Note {
     /// What `deposit` publishes.
     pub fn commitment(&self) -> [u8; 32] {
         enc(&self.leaf())
+    }
+
+    /// The one nullifier this note can ever burn, computed from the secret
+    /// directly (not taken from a prover's output).
+    pub fn nullifier(&self) -> Digest8 {
+        let out = permute(self.pack(spend_round(&self.pool())));
+        core::array::from_fn(|i| out[i])
     }
 }
 
@@ -434,6 +467,164 @@ pub fn attestation_ix(signer: &Keypair, msg: &[u8]) -> Instruction {
     Instruction { program_id: solana_sdk::ed25519_program::ID, accounts: vec![], data }
 }
 
+// ---- committee-free withdrawal ----------------------------------------------------
+
+/// A withdrawal the chain verifies itself: [`WithdrawBundle`]'s statement with
+/// both proofs bound to `recipient`, the recipient TOKEN ACCOUNT the program
+/// compares against the buffer's `B_RECIPIENT`. Bound, the uploaded bytes (public
+/// transaction data) are useless to a watcher: under any other recipient the
+/// verifier refuses them. The proofs are `to_bytes()` (bincode), exactly what
+/// the verifier's slots hold (slot 0 binding, slot 1 membership).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct BoundWithdraw {
+    pub pool: String,
+    pub recipient: String,
+    pub root: Digest8,
+    pub c: Digest8,
+    pub nullifier: Digest8,
+    #[serde(with = "hex::serde")]
+    pub binding: Vec<u8>,
+    #[serde(with = "hex::serde")]
+    pub membership: Vec<u8>,
+}
+
+impl BoundWithdraw {
+    pub fn pool(&self) -> Pubkey {
+        self.pool.parse().expect("bundle pool address")
+    }
+    pub fn recipient(&self) -> Pubkey {
+        self.recipient.parse().expect("bundle recipient address")
+    }
+    pub fn nullifier_bytes(&self) -> [u8; 32] {
+        enc(&self.nullifier)
+    }
+    pub fn root_bytes(&self) -> [u8; 32] {
+        enc(&self.root)
+    }
+
+    /// INIT's claimed public inputs, `action | round | C | nullifier | root`,
+    /// eight u32 limbs each. INIT refuses a non-canonical limb or a round that is
+    /// not a u64, so every value here comes from [`enc`]'s domain or
+    /// [`spend_round`].
+    pub fn publics(&self) -> [u32; 40] {
+        let pool = self.pool();
+        let fields = [note_action(&pool), spend_round(&pool), self.c, self.nullifier, self.root];
+        core::array::from_fn(|k| fields[k / 8][k % 8] as u32)
+    }
+}
+
+/// [`prove_withdraw`] bound to `recipient` (the recipient token account), at the
+/// parameters the staged verifier hard-codes. Runs on the depositor's machine;
+/// once bound, anyone may upload and drive it (a relayer), since the payout can
+/// only go to `recipient`.
+pub fn prove_withdraw_bound(note: &Note, tree: &Tree, index: u32, recipient: &Pubkey) -> BoundWithdraw {
+    let pool = note.pool();
+    let leaf = note.leaf();
+    assert_eq!(tree.leaf(index), Some(leaf), "the note is not the leaf at this index");
+    let r = recipient.to_bytes();
+    let blinder = os_m31();
+    let (bproof, c, leaf_digest, nullifier) = prove_binding_crowd_for(
+        &r,
+        note.secret,
+        note_action(&pool),
+        spend_round(&pool),
+        blinder,
+        QUERIES,
+        LOG_BLOWUP,
+        LOG_ROWS,
+        os_seed(),
+    );
+    assert_eq!(leaf_digest, leaf, "the crate's leaf must equal the note's");
+    let (mproof, c2, root) =
+        prove_membership_crowd_for(&r, leaf, blinder, &tree.path(index), QUERIES, LOG_BLOWUP, os_seed());
+    assert_eq!(c, c2, "one (leaf, blinder) commits identically in both relations");
+    assert_eq!(root, tree.root());
+    BoundWithdraw {
+        pool: pool.to_string(),
+        recipient: recipient.to_string(),
+        root,
+        c,
+        nullifier,
+        binding: bproof.to_bytes(),
+        membership: mproof.to_bytes(),
+    }
+}
+
+/// Query positions per QUERIES transaction: a client choice (the verifier takes
+/// any batch of unverified positions). 2 is what the verifier's
+/// `tests/staged.rs` measures at ~1.21M CU for the binding proof, its most
+/// expensive stage.
+pub const STAGED_QUERY_BATCH: usize = 2;
+const STAGE_CU_LIMIT: u32 = 1_400_000;
+const STAGE_HEAP_FRAME: u32 = 256 * 1024;
+
+/// One transaction of a staged verification run, unsigned.
+pub struct StagedTx {
+    pub label: String,
+    pub instructions: Vec<Instruction>,
+    /// Only create + INIT: the buffer keypair co-signs, so nobody can INIT a
+    /// buffer they did not create.
+    pub buffer_signs: bool,
+}
+
+impl StagedTx {
+    /// `authority` pays and signs every transaction.
+    pub fn sign(&self, authority: &Keypair, buffer: &Keypair, blockhash: Hash) -> Transaction {
+        let msg = Message::new(&self.instructions, Some(&authority.pubkey()));
+        if self.buffer_signs {
+            Transaction::new(&[authority, buffer], msg, blockhash)
+        } else {
+            Transaction::new(&[authority], msg, blockhash)
+        }
+    }
+}
+
+/// The verifier buffer's account size for this bundle.
+pub fn staged_buffer_len(b: &BoundWithdraw) -> usize {
+    staged_client::buffer_size(&[b.binding.len(), b.membership.len()])
+}
+
+/// Every transaction that takes `b` to a FINALIZED (settleable) buffer, in
+/// order, the sequence the verifier's `tests/staged.rs` drives: create the
+/// buffer (rent-exempt at `Rent::default()`, refundable by the verifier's
+/// CLOSE) and INIT it as `KIND_CROWD | KIND_BOUND` for `b.recipient` in one
+/// transaction; one WRITE of `staged_client::WRITE_CHUNK` bytes per transaction;
+/// then SEAL, per slot TRANSCRIPT, QUOTIENT, OOD and the QUERIES batches, and
+/// FINALIZE, one per transaction, each behind an explicit 1.4M CU limit and the
+/// 256 KB heap frame. `authority` is fee payer and buffer authority; send them
+/// in order, each after the previous one landed.
+pub fn staged_withdraw_txs(verifier: &Pubkey, authority: &Pubkey, buffer: &Pubkey, b: &BoundWithdraw) -> Vec<StagedTx> {
+    let kind = staged::KIND_CROWD | staged::KIND_BOUND;
+    let lens = [b.binding.len(), b.membership.len()];
+    let size = staged_client::buffer_size(&lens);
+    let lamports = Rent::default().minimum_balance(size);
+    let mut txs = vec![StagedTx {
+        label: "create + INIT".to_string(),
+        instructions: vec![
+            system_instruction::create_account(authority, buffer, lamports, size as u64, verifier),
+            staged_client::init(verifier, buffer, authority, kind, 0, &b.recipient(), &b.publics(), &lens),
+        ],
+        buffer_signs: true,
+    }];
+    for (slot, bytes) in [(0u8, &b.binding), (1u8, &b.membership)] {
+        for (k, ix) in staged_client::writes(verifier, buffer, authority, slot, bytes).into_iter().enumerate() {
+            txs.push(StagedTx { label: format!("slot {slot} WRITE {k}"), instructions: vec![ix], buffer_signs: false });
+        }
+    }
+    for (label, ix) in staged_client::verification_plan(verifier, buffer, authority, kind, STAGED_QUERY_BATCH) {
+        txs.push(StagedTx {
+            label,
+            instructions: vec![
+                ComputeBudgetInstruction::set_compute_unit_limit(STAGE_CU_LIMIT),
+                ComputeBudgetInstruction::request_heap_frame(STAGE_HEAP_FRAME),
+                ix,
+            ],
+            buffer_signs: false,
+        });
+    }
+    txs
+}
+
 // ---- accounts -------------------------------------------------------------------
 
 pub fn pda(seeds: &[&[u8]]) -> Pubkey {
@@ -663,5 +854,53 @@ pub fn ragequit_ix(
             AccountMeta::new_readonly(solana_sdk::sysvar::instructions::ID, false),
         ],
         data,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spend_round_is_the_verifiers_u64_encoding() {
+        // Known answers from Python's hashlib, not this crate's sha2:
+        // first 8 bytes, LE, of sha256(b"vineland/spend/v2" || pool).
+        let known = [(Pubkey::new_from_array([0; 32]), 0xabd8_ad3e_400f_1deeu64), (Pubkey::new_from_array([0xff; 32]), 0x1307_affd_639c_a48f)];
+        for (pool, want) in known {
+            assert_eq!(spend_round_u64(&pool), want);
+        }
+        for pool in [known[0].0, known[1].0, Pubkey::new_unique(), Pubkey::new_unique()] {
+            let r = spend_round_u64(&pool);
+            let limbs = spend_round(&pool);
+            assert_eq!(limbs, [r & 0xffff, (r >> 16) & 0xffff, (r >> 32) & 0xffff, r >> 48, 0, 0, 0, 0]);
+            let as_u32: Vec<u32> = limbs.iter().map(|&l| l as u32).collect();
+            assert_eq!(staged::round_u64(&as_u32), Some(r), "round-trips through the verifier's decoder");
+        }
+    }
+
+    #[test]
+    fn every_staged_transaction_fits_the_packet() {
+        // The production proof sizes the verifier's tests report; the bytes'
+        // content does not change any transaction's size.
+        let b = BoundWithdraw {
+            pool: Pubkey::new_unique().to_string(),
+            recipient: Pubkey::new_unique().to_string(),
+            root: [1; DIGEST_LEN],
+            c: [2; DIGEST_LEN],
+            nullifier: [3; DIGEST_LEN],
+            binding: vec![0xAB; 109_377],
+            membership: vec![0xCD; 84_257],
+        };
+        let (authority, buffer) = (Keypair::new(), Keypair::new());
+        let plan = staged_withdraw_txs(&Pubkey::new_unique(), &authority.pubkey(), &buffer.pubkey(), &b);
+        let writes = b.binding.len().div_ceil(staged_client::WRITE_CHUNK) + b.membership.len().div_ceil(staged_client::WRITE_CHUNK);
+        // create + INIT, the WRITEs, SEAL, 2 x (TRANSCRIPT, QUOTIENT, OOD, 6 QUERIES), FINALIZE
+        assert_eq!(plan.len(), 1 + writes + 1 + 2 * (3 + 6) + 1);
+        assert_eq!(staged_buffer_len(&b), 196_066);
+        for t in &plan {
+            let tx = t.sign(&authority, &buffer, Hash::default());
+            let size = 1 + 64 * tx.signatures.len() + tx.message.serialize().len();
+            assert!(size <= 1232, "{}: {size} B", t.label);
+        }
     }
 }
