@@ -309,6 +309,15 @@ fn main() {
         &[],
     );
 
+    // The role keys are throwaway: return what the relayer (including the buffer
+    // rent the verifier just refunded) and the operator still hold.
+    for (label, kp) in [("relayer returns its SOL", &relayer), ("operator returns its SOL", &operator)] {
+        let left = run.rpc.client.get_balance(&kp.pubkey()).unwrap_or(0);
+        if left > 10_000 {
+            run.send(label, &[system_instruction::transfer(&kp.pubkey(), &payer.pubkey(), left - 5_000)], kp, &[]);
+        }
+    }
+
     let clean_bal = run.balance(&clean_ta.pubkey());
     let treasury_bal = run.balance(&treasury.pubkey());
     let vault_bal = run.balance(&vault);
@@ -352,7 +361,10 @@ fn main() {
         run.sent,
         run.log
     );
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/DEVNET_RUN_COMMITTEE_FREE.md");
-    std::fs::write(path, md).expect("write the run record");
+    // `VINELAND_RUN_OUT` writes the record elsewhere (a recording run, say), so
+    // the committed one stays the run the README links to.
+    let path = std::env::var("VINELAND_RUN_OUT")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/DEVNET_RUN_COMMITTEE_FREE.md").to_string());
+    std::fs::write(&path, md).expect("write the run record");
     println!("wrote {path}");
 }
