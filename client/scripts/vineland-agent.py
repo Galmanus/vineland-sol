@@ -67,7 +67,7 @@ def connect(_args):
     deadline = time.time() + int(d.get("expires_in", 600))
     while time.time() < deadline:
         time.sleep(interval)
-        code, t = http("POST", f"{PRIVY}/token", {"grant_type": "device_code", "device_code": d["device_code"]}, {"privy-app-id": PRIVY_APP_ID})
+        code, t = http("POST", f"{PRIVY}/token", {"grant_type": "urn:ietf:params:oauth:grant-type:device_code", "device_code": d["device_code"]}, {"privy-app-id": PRIVY_APP_ID})
         if code == 200 and t.get("access_token"):
             save({"access_token": t["access_token"], "refresh_token": t["refresh_token"], "expires_at": time.time() + int(t.get("expires_in", 900))})
             print("Approved. This agent can now pay from that Vineland account until the owner revokes it.")
