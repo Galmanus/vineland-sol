@@ -347,7 +347,10 @@ impl Privy {
             .verify(msg.as_bytes(), &sig)
             .map_err(|_| "JWT signature does not verify")?;
         let claims: Value = serde_json::from_slice(&b64.decode(parts[1]).map_err(|_| "bad JWT claims")?).map_err(|_| "bad JWT claims")?;
-        if claims["iss"] != "privy.io" {
+        // A browser session is issued by "privy.io"; an agent's device-flow token
+        // (an owner-approved grant) by "privy:<app id>". Same keys, same audience.
+        let agent_iss = format!("privy:{}", self.app_id);
+        if claims["iss"] != "privy.io" && claims["iss"] != agent_iss.as_str() {
             return Err("JWT not issued by Privy".into());
         }
         let aud_ok = claims["aud"] == self.app_id.as_str() || claims["aud"].as_array().is_some_and(|a| a.iter().any(|v| v == self.app_id.as_str()));
@@ -357,7 +360,9 @@ impl Privy {
         if claims["exp"].as_u64().unwrap_or(0) + 30 < now() {
             return Err("session expired, sign in again".into());
         }
-        claims["sub"].as_str().filter(|s| !s.is_empty()).map(str::to_string).ok_or_else(|| "JWT without a user".to_string())
+        // Agent tokens carry the bare user id; sessions carry "did:privy:<id>". One user, one key.
+        let sub = claims["sub"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| "JWT without a user".to_string())?;
+        Ok(if sub.starts_with("did:privy:") { sub.to_string() } else { format!("did:privy:{sub}") })
     }
 }
 
