@@ -62,6 +62,17 @@ struct Relayer {
     key: Keypair,
     job: Mutex<()>,
     busy: AtomicBool,
+    /// The running withdrawal's (stage, transactions landed, transactions in
+    /// the plan), for GET /progress: a dashboard shows "verifying k of N".
+    progress: Mutex<(String, usize, usize)>,
+}
+
+impl Relayer {
+    fn report(&self, stage: &str, done: usize, total: usize) {
+        if let Ok(mut p) = self.progress.lock() {
+            *p = (stage.to_string(), done, total);
+        }
+    }
 }
 
 type Reply = (u16, Value);
@@ -92,7 +103,7 @@ fn main() {
     }));
     eprintln!("relayer {} listening on http://{bind}, cluster {url}", key.pubkey());
 
-    let state = Arc::new(Relayer { rpc, key, job: Mutex::new(()), busy: AtomicBool::new(false) });
+    let state = Arc::new(Relayer { rpc, key, job: Mutex::new(()), busy: AtomicBool::new(false), progress: Mutex::new(("idle".into(), 0, 0)) });
     let workers: Vec<_> = (0..WORKERS)
         .map(|_| {
             let (server, state) = (server.clone(), state.clone());
@@ -113,6 +124,7 @@ fn handle(st: &Relayer, mut req: Request) {
     let path = req.url().split('?').next().unwrap_or("").to_string();
     let (code, body) = match (req.method(), path.as_str()) {
         (Method::Get, "/health") => health(st),
+        (Method::Get, "/progress") => progress(st),
         (Method::Post, "/withdraw") => match read_body(&mut req) {
             Ok(body) => exclusive(st, || withdraw(st, &body)),
             Err(r) => r,
@@ -121,8 +133,8 @@ fn handle(st: &Relayer, mut req: Request) {
             Ok(body) => exclusive(st, || crank(st, &body)),
             Err(r) => r,
         },
-        (_, "/health" | "/withdraw" | "/crank") => refuse(405, "method not allowed"),
-        _ => refuse(404, "not found: POST /withdraw, POST /crank, GET /health"),
+        (_, "/health" | "/progress" | "/withdraw" | "/crank") => refuse(405, "method not allowed"),
+        _ => refuse(404, "not found: POST /withdraw, POST /crank, GET /health, GET /progress"),
     };
     let json_type = Header::from_bytes("Content-Type", "application/json").unwrap();
     let resp = Response::from_string(body.to_string()).with_status_code(code).with_header(json_type);
@@ -155,6 +167,11 @@ fn exclusive(st: &Relayer, job: impl FnOnce() -> Reply) -> Reply {
     let reply = catch_unwind(AssertUnwindSafe(job)).unwrap_or_else(|_| refuse(500, "internal error (see the relayer log)"));
     st.busy.store(false, Ordering::SeqCst);
     reply
+}
+
+fn progress(st: &Relayer) -> Reply {
+    let (stage, done, total) = st.progress.lock().map(|p| p.clone()).unwrap_or(("unknown".into(), 0, 0));
+    (200, json!({ "busy": st.busy.load(Ordering::SeqCst), "stage": stage, "done": done, "total": total }))
 }
 
 fn health(st: &Relayer) -> Reply {
@@ -340,27 +357,38 @@ fn withdraw(st: &Relayer, body: &[u8]) -> Reply {
             }
         }
     };
+    let total = plan.len() + 1;
+    st.report("uploading", 0, total);
     let (init, rest) = plan.split_first().expect("a plan starts with create + INIT");
     match st.rpc.land(&init.instructions, &st.key, &[&buffer]) {
         Ok((sig, _)) => {
             sent += 1;
+            st.report("uploading", 1, total);
             sigs.insert("init".into(), json!(sig.to_string()));
         }
         Err(e) => return fail(&init.label, e, sigs, None),
     }
     let (writes, stages): (Vec<_>, Vec<_>) = rest.iter().partition(|t| t.label.contains("WRITE"));
-    let batch: Vec<_> = writes.iter().map(|t| t.instructions.clone()).collect();
-    match st.rpc.land_all(&batch, &st.key) {
-        Ok(s) => sent += s.len(),
-        Err(e) => {
-            let closed = close(&mut sigs);
-            return fail("WRITE", e, sigs, Some(closed));
+    // One WRITE at a time, each confirmed before the next: slower than a batch
+    // on paper, but it is what holds up on a rate-limited public RPC (a batch
+    // there loses its status polls and resends the whole upload).
+    for step in writes {
+        match st.rpc.land(&step.instructions, &st.key, &[]) {
+            Ok(_) => {
+                sent += 1;
+                st.report("uploading", sent, total);
+            }
+            Err(e) => {
+                let closed = close(&mut sigs);
+                return fail(&step.label, e, sigs, Some(closed));
+            }
         }
     }
     for step in stages {
         match st.rpc.land(&step.instructions, &st.key, &[]) {
             Ok((sig, _)) => {
                 sent += 1;
+                st.report("verifying", sent, total);
                 if step.label == "SEAL" {
                     sigs.insert("seal".into(), json!(sig.to_string()));
                 } else if step.label == "FINALIZE" {
@@ -385,6 +413,7 @@ fn withdraw(st: &Relayer, body: &[u8]) -> Reply {
             return fail("withdraw", e, sigs, Some(closed));
         }
     }
+    st.report("paid", total, total);
     let closed = close(&mut sigs);
     if closed {
         sent += 1;

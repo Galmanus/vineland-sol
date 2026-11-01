@@ -1,0 +1,550 @@
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { usePrivy } from "@privy-io/react-auth";
+import { useSignTransaction, useWallets } from "@privy-io/react-auth/solana";
+import { api, b64ToBytes, explorer, sendRaw, short } from "./api.js";
+
+const DEVNET_RPC = "https://api.devnet.solana.com";
+const units = (n) => (n / 1_000_000).toFixed(2);
+
+// ---- shells: who signs ----------------------------------------------------------------
+
+export default function App({ privy }) {
+  return privy ? <PrivyShell /> : <KeypairShell />;
+}
+
+function PrivyShell() {
+  const { ready, authenticated, login, logout, user } = usePrivy();
+  const { wallets } = useWallets();
+  const { signTransaction } = useSignTransaction();
+  const wallet = wallets?.[0];
+  const signer = useMemo(
+    () =>
+      wallet && {
+        kind: "privy",
+        async signAndSend(txB64) {
+          const { signedTransaction } = await signTransaction({ transaction: b64ToBytes(txB64), wallet, chain: "solana:devnet" });
+          return sendRaw(DEVNET_RPC, signedTransaction);
+        },
+      },
+    [wallet, signTransaction],
+  );
+  if (!ready) return <Splash text="Loading" />;
+  if (!authenticated) return <Landing onLogin={login} />;
+  if (!wallet) return <Splash text="Creating your Solana wallet" />;
+  return <Dashboard address={wallet.address} signer={signer} who={user?.email?.address} onLogout={logout} />;
+}
+
+function KeypairShell() {
+  const [cfg, setCfg] = useState(null);
+  useEffect(() => {
+    api.config().then(setCfg).catch(() => setCfg({}));
+  }, []);
+  if (!cfg) return <Splash text="Loading" />;
+  if (!cfg.keypair_wallet) return <Splash text="Start vineland-node with VINELAND_KEYPAIR, or build the dashboard with a Privy app id" />;
+  return <Dashboard address={cfg.keypair_wallet} signer={{ kind: "keypair" }} />;
+}
+
+// ---- layout ------------------------------------------------------------------------------
+
+function Mark() {
+  return (
+    <svg width="28" height="28" viewBox="0 0 512 512" aria-hidden="true">
+      <rect width="512" height="512" rx="110" fill="#111" />
+      <path d="M96 128h92l68 196 68-196h92L306 400h-100z" fill="#EFE8DD" />
+      <circle cx="416" cy="404" r="22" fill="#F5B83E" />
+    </svg>
+  );
+}
+
+function Splash({ text }) {
+  return (
+    <div className="splash">
+      <Mark />
+      <p>{text}</p>
+    </div>
+  );
+}
+
+function Landing({ onLogin }) {
+  return (
+    <div className="landing">
+      <header className="topbar">
+        <div className="brand">
+          <Mark /> <span>Vineland</span>
+        </div>
+        <div className="pills">
+          <span className="pill gold">post-quantum</span>
+          <span className="pill">Solana devnet · not audited</span>
+        </div>
+      </header>
+      <main className="hero">
+        <p className="eyebrow">The privacy layer for stablecoin payments</p>
+        <h1>
+          Pay suppliers, payroll and services in stablecoins
+          <br />
+          <em>without publishing who you pay.</em>
+        </h1>
+        <p className="lede">
+          On a public ledger every payment shows who paid whom. With Vineland the payment stays public and auditable, and the link back
+          to you does not. For companies and for AI agents.
+        </p>
+        <button className="btn primary big" onClick={onLogin}>
+          Sign in with email
+        </button>
+        <ul className="points">
+          <li>
+            <b>Verified by Solana itself.</b> No committee, nobody can approve a payout.
+          </li>
+          <li>
+            <b>Post-quantum.</b> Built only from hashes, so the privacy does not expire.
+          </li>
+          <li>
+            <b>Your secret stays on this machine.</b> The proof is made here.
+          </li>
+        </ul>
+      </main>
+    </div>
+  );
+}
+
+const PAGES = ["Overview", "Pay", "Top up", "Receipts", "Agents", "Settings"];
+
+function Dashboard({ address, signer, who, onLogout }) {
+  const [page, setPage] = useState("Overview");
+  const [cfg, setCfg] = useState(null);
+  const [st, setSt] = useState(null);
+  const [err, setErr] = useState("");
+  const refresh = useCallback(() => {
+    api.status(address).then(setSt).catch((e) => setErr(e.message));
+  }, [address]);
+  useEffect(() => {
+    api.config().then(setCfg).catch((e) => setErr(e.message));
+    refresh();
+    const t = setInterval(refresh, 8000);
+    return () => clearInterval(t);
+  }, [refresh]);
+
+  return (
+    <div className="app">
+      <aside className="side">
+        <div className="brand">
+          <Mark /> <span>Vineland</span>
+        </div>
+        <nav>
+          {PAGES.map((p) => (
+            <button key={p} className={p === page ? "nav on" : "nav"} onClick={() => setPage(p)}>
+              {p}
+            </button>
+          ))}
+        </nav>
+        <div className="side-foot">
+          <span className="pill gold">post-quantum</span>
+          <span className="pill">devnet · not audited</span>
+        </div>
+      </aside>
+      <section className="main">
+        <header className="bar">
+          <h2>{page}</h2>
+          <div className="who">
+            <span className="mono">{short(address, 5)}</span>
+            {who && <span className="muted">{who}</span>}
+            {onLogout && (
+              <button className="btn ghost" onClick={onLogout}>
+                Sign out
+              </button>
+            )}
+          </div>
+        </header>
+        {err && (
+          <div className="alert" onClick={() => setErr("")}>
+            {err}
+          </div>
+        )}
+        {page === "Overview" && <Overview st={st} cfg={cfg} address={address} refresh={refresh} setErr={setErr} go={setPage} />}
+        {page === "Pay" && <Pay st={st} address={address} refresh={refresh} />}
+        {page === "Top up" && <TopUp st={st} address={address} signer={signer} refresh={refresh} />}
+        {page === "Receipts" && <Receipts address={address} />}
+        {page === "Agents" && <Agents cfg={cfg} />}
+        {page === "Settings" && <Settings cfg={cfg} st={st} />}
+      </section>
+    </div>
+  );
+}
+
+// ---- pages ---------------------------------------------------------------------------
+
+function Stat({ label, value, sub }) {
+  return (
+    <div className="stat">
+      <div className="label">{label}</div>
+      <div className="value">{value}</div>
+      {sub && <div className="sub">{sub}</div>}
+    </div>
+  );
+}
+
+function Overview({ st, cfg, address, refresh, setErr, go }) {
+  const [busy, setBusy] = useState(false);
+  const w = st?.wallet;
+  const p = st?.pool;
+  const note = p?.note_amount ?? 1_000_000;
+  const ready = w?.notes?.ready ?? 0;
+  const approve = async () => {
+    setBusy(true);
+    try {
+      await api.onboard(address);
+      refresh();
+    } catch (e) {
+      setErr(e.message);
+    }
+    setBusy(false);
+  };
+  return (
+    <div className="grid">
+      <div className="card wide intro">
+        <p>
+          Your payments leave from the Vineland vault, not from your wallet. Anyone can audit the amount and the time; nobody can link the
+          payment back to you.
+        </p>
+      </div>
+      <Stat label="Ready to pay" value={`${units(ready * note)}`} sub={`${ready} note${ready === 1 ? "" : "s"} of ${units(note)} test dollars`} />
+      <Stat label="Privacy set" value={p?.privacy_set ?? "…"} sub={`approved deposits your payment hides among (floor ${p?.k_min ?? 3})`} />
+      <Stat label="In your wallet" value={units(w?.test_dollars ?? 0)} sub={`test dollars · ${(w?.sol ?? 0).toFixed(3)} SOL for fees`} />
+      <div className="card">
+        <div className="label">Approval</div>
+        {w?.approved ? (
+          <div className="ok">Approved to deposit</div>
+        ) : (
+          <>
+            <div className="warn">Not approved yet</div>
+            <p className="muted small">Wallets are approved once, after KYC. On this devnet demo the operator approves you instantly.</p>
+            {cfg?.operator && (
+              <button className="btn primary" disabled={busy} onClick={approve}>
+                {busy ? "Approving…" : "Request approval (demo)"}
+              </button>
+            )}
+          </>
+        )}
+      </div>
+      <div className="card wide">
+        <div className="row between">
+          <div className="label">Next step</div>
+        </div>
+        {!w?.approved ? (
+          <p>Get approved, then top up.</p>
+        ) : ready === 0 && (w?.notes?.deposited ?? 0) === 0 ? (
+          <p>
+            Top up: deposit test dollars as private notes. <button className="link" onClick={() => go("Top up")}>Top up →</button>
+          </p>
+        ) : ready === 0 ? (
+          <p>Your deposit is being folded into the on-chain tree. This takes a minute.</p>
+        ) : (
+          <p>
+            You can pay privately now. <button className="link" onClick={() => go("Pay")}>Pay →</button>
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Pay({ st, address, refresh }) {
+  const [to, setTo] = useState("");
+  const [reference, setReference] = useState("");
+  const [job, setJob] = useState(null);
+  const [err, setErr] = useState("");
+  const ready = st?.wallet?.notes?.ready ?? 0;
+  const note = st?.pool?.note_amount ?? 1_000_000;
+  const fee = st?.pool?.fee ?? 19_700;
+
+  useEffect(() => {
+    if (!job || job.state !== "running") return;
+    const t = setInterval(async () => {
+      try {
+        const j = await api.job(job.id);
+        setJob(j);
+        if (j.state !== "running") refresh();
+      } catch {}
+    }, 2000);
+    return () => clearInterval(t);
+  }, [job, refresh]);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setErr("");
+    try {
+      const { job: id } = await api.pay(address, to.trim(), 1, reference.trim());
+      setJob({ id, state: "running", stage: "starting" });
+    } catch (e) {
+      setErr(e.message);
+    }
+  };
+
+  const pct = job?.total ? Math.min(100, Math.round((100 * job.done) / job.total)) : job?.state === "paid" ? 100 : 4;
+  const receipt = job?.receipts?.[0];
+  return (
+    <div className="grid">
+      <form className="card wide" onSubmit={submit}>
+        <label>
+          Pay to (recipient wallet)
+          <input value={to} onChange={(e) => setTo(e.target.value)} placeholder="Solana address of your supplier or service" required />
+        </label>
+        <label>
+          Reference
+          <input value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Invoice number, for your records only" />
+        </label>
+        <div className="row between">
+          <div className="muted">
+            Amount: one note, {units(note)} test dollars · recipient gets {units(note - fee)} · fee {units(fee)} (1.97%)
+          </div>
+          <button className="btn primary" disabled={ready < 1 || job?.state === "running"}>
+            {ready < 1 ? "No notes ready" : "Pay privately"}
+          </button>
+        </div>
+        {err && <div className="alert">{err}</div>}
+      </form>
+      {job && (
+        <div className="card wide">
+          <div className="steps">
+            <Step on={job.stage !== "starting"} done={!!job.total || job.state === "paid"} text="Proof made on this machine" />
+            <Step
+              on={!!job.total}
+              done={job.state === "paid"}
+              text={`${String(job.stage).startsWith("uploading") ? "Uploading the proof, then Solana verifies it" : "Solana verifies it"}${job.total ? ` · ${job.done}/${job.total} transactions` : ""}`}
+            />
+            <Step on={job.state === "paid"} done={job.state === "paid"} text="Paid from the Vineland vault" />
+          </div>
+          <div className="progress">
+            <div style={{ width: `${pct}%` }} />
+          </div>
+          <div className="muted small">{job.state === "failed" ? `Failed: ${job.error}` : job.stage}</div>
+          {receipt && (
+            <div className="paid">
+              <div>
+                Paid {units(receipt.paid)} to <span className="mono">{short(receipt.to, 6)}</span>
+              </div>
+              <a href={explorer("tx", receipt.withdraw)} target="_blank" rel="noreferrer">
+                See it on the explorer →
+              </a>
+              <div className="muted small">Your wallet does not appear in this transaction.</div>
+            </div>
+          )}
+        </div>
+      )}
+      <div className="card wide muted small">
+        On devnet a private payment takes about ten minutes today: the proof is checked on Solana itself across about two hundred transactions.
+        Your secret never leaves this machine; the relayer only sees the proof and the recipient.
+      </div>
+    </div>
+  );
+}
+
+function Step({ on, done, text }) {
+  return <div className={`step ${on ? "on" : ""} ${done ? "done" : ""}`}>{text}</div>;
+}
+
+function TopUp({ st, address, signer, refresh }) {
+  const [count, setCount] = useState(1);
+  const [log, setLog] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const note = st?.pool?.note_amount ?? 1_000_000;
+  const add = (line) => setLog((l) => [...l, line]);
+  const deposit = async () => {
+    setBusy(true);
+    setLog([]);
+    try {
+      if (signer.kind === "keypair") {
+        const r = await api.depositKeypair(count);
+        r.deposits.forEach((d) => add({ text: "Deposited one note", sig: d.signature }));
+      } else {
+        const { transactions } = await api.depositPrepare(address, count);
+        for (const t of transactions) {
+          add({ text: "Sign the deposit in your wallet…" });
+          const sig = await signer.signAndSend(t.transaction);
+          add({ text: "Deposit sent", sig });
+          await api.depositConfirm(t.note, sig);
+          add({ text: "Deposit confirmed on chain" });
+        }
+      }
+      add({ text: "Folding your deposit into the on-chain tree (about a minute)." });
+      refresh();
+    } catch (e) {
+      add({ text: `Error: ${e.message}`, error: true });
+    }
+    setBusy(false);
+  };
+  return (
+    <div className="grid">
+      <div className="card wide">
+        <p>
+          Deposit test dollars as private notes of {units(note)} each. Your deposit is public and attributable to you (the auditor sees it);
+          what nobody can see later is which payment it funded.
+        </p>
+        <div className="row">
+          <input type="number" min="1" max="5" value={count} onChange={(e) => setCount(Math.max(1, Math.min(5, +e.target.value || 1)))} className="num" />
+          <span className="muted">note{count > 1 ? "s" : ""} = {units(count * note)} test dollars</span>
+          <button className="btn primary" disabled={busy || !st?.wallet?.approved} onClick={deposit}>
+            {busy ? "Depositing…" : st?.wallet?.approved ? "Deposit" : "Get approved first"}
+          </button>
+        </div>
+        <ul className="log">
+          {log.map((l, i) => (
+            <li key={i} className={l.error ? "err" : ""}>
+              {l.text}{" "}
+              {l.sig && (
+                <a href={explorer("tx", l.sig)} target="_blank" rel="noreferrer">
+                  {short(l.sig, 6)}
+                </a>
+              )}
+            </li>
+          ))}
+        </ul>
+      </div>
+      <div className="card wide">
+        <div className="label">Your notes</div>
+        <table>
+          <thead>
+            <tr>
+              <th>Note</th>
+              <th>State</th>
+              <th>Deposit</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(st?.wallet?.note_list ?? []).map((n) => (
+              <tr key={n.id}>
+                <td className="mono">{short(n.id, 6)}</td>
+                <td>{n.state}</td>
+                <td>{n.deposit_sig ? <a href={explorer("tx", n.deposit_sig)} target="_blank" rel="noreferrer">{short(n.deposit_sig, 6)}</a> : "–"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function Receipts({ address }) {
+  const [rows, setRows] = useState([]);
+  useEffect(() => {
+    api.receipts(address).then((r) => setRows(r.receipts)).catch(() => {});
+  }, [address]);
+  const exportCsv = async () => {
+    const blob = await api.receiptsCsv(address);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "vineland-receipts.csv";
+    a.click();
+  };
+  return (
+    <div className="grid">
+      <div className="card wide">
+        <div className="row between">
+          <p className="muted">
+            Each private payment has a receipt only you hold: the note behind it. Export them to show your auditor exactly which payments were
+            yours.
+          </p>
+          <button className="btn" onClick={exportCsv} disabled={!rows.length}>
+            Export for auditor (CSV)
+          </button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>When</th>
+              <th>Reference</th>
+              <th>Paid to</th>
+              <th>Amount</th>
+              <th>Transaction</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan="5" className="muted">
+                  No payments yet.
+                </td>
+              </tr>
+            )}
+            {rows
+              .slice()
+              .reverse()
+              .map((r) => (
+                <tr key={r.withdraw}>
+                  <td>{new Date(r.time * 1000).toLocaleString()}</td>
+                  <td>{r.reference || "–"}</td>
+                  <td className="mono">{short(r.to, 6)}</td>
+                  <td>{units(r.paid)}</td>
+                  <td>
+                    <a href={explorer("tx", r.withdraw)} target="_blank" rel="noreferrer">
+                      {short(r.withdraw, 6)}
+                    </a>
+                  </td>
+                </tr>
+              ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function Agents({ cfg }) {
+  const base = window.location.origin;
+  const snippet = `# what the agent's wallet can pay with right now
+curl -s ${base}/api/status -H "Authorization: Bearer $VINELAND_TOKEN"
+
+# pay a provider privately: one call, the proof is made on this machine
+curl -s -X POST ${base}/api/pay \\
+  -H "Authorization: Bearer $VINELAND_TOKEN" -H "Content-Type: application/json" \\
+  -d '{"to": "<PROVIDER_WALLET>", "notes": 1, "reference": "data-api-oct"}'
+
+# follow the payment until it is paid
+curl -s ${base}/api/jobs/<JOB_ID> -H "Authorization: Bearer $VINELAND_TOKEN"`;
+  return (
+    <div className="grid">
+      <div className="card wide">
+        <p>
+          An AI agent that pays for data, models and APIs in stablecoins tells everyone watching the chain who it works for and what it buys.
+          Through Vineland the provider is paid from the vault: nobody can map which agent bought which service.
+        </p>
+        <p className="muted small">
+          The agent runs this node with its own approved wallet (<span className="mono">VINELAND_KEYPAIR</span>) and calls the same API the dashboard uses. The
+          token is printed when the node starts.
+        </p>
+        <pre>{snippet}</pre>
+      </div>
+    </div>
+  );
+}
+
+function Settings({ cfg, st }) {
+  if (!cfg) return null;
+  const rel = st?.relayer;
+  const rows = [
+    ["Cluster", cfg.cluster],
+    ["Pool", cfg.pool],
+    ["Test dollar mint", cfg.mint],
+    ["Pool program", cfg.pool_program],
+    ["Verifier program", cfg.verifier_program],
+    ["Relayer", `${cfg.relayer}${rel ? ` · ${rel.relayer} · ${Number(rel.balance_sol).toFixed(2)} SOL` : " · unreachable"}`],
+  ];
+  return (
+    <div className="grid">
+      <div className="card wide">
+        <table>
+          <tbody>
+            {rows.map(([k, v]) => (
+              <tr key={k}>
+                <td className="muted">{k}</td>
+                <td className="mono">{v}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p className="muted small">Devnet only. Not audited. Amounts are public by design; the link between payer and payee is what Vineland removes.</p>
+      </div>
+    </div>
+  );
+}

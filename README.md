@@ -31,6 +31,7 @@ Vineland is a privacy layer a business, or an AI agent's operator, puts in front
 | The whole flow **on Solana devnet**, 239 transactions, every refusal named, each signature linked | [`docs/DEVNET_RUN_COMMITTEE_FREE.md`](docs/DEVNET_RUN_COMMITTEE_FREE.md) |
 | The private payout itself: one signer (the relayer), one program, clean wallet `0 -> 980,300` | [explorer (devnet)](https://explorer.solana.com/tx/Sg7NfZ2zgYiApPmxko1HRnRQmv6CmWGG6RACVjQPcg8yZ9wYRzeeDgmDqLEmqHrKq2uwQ14L3YhHawryJ59t9Cw?cluster=devnet) |
 | The on-chain verification finishing: both proofs verified, buffer marked settleable | [FINALIZE (devnet)](https://explorer.solana.com/tx/2h6eEf5sEfkqXvdgVmG9m87o7uoRYmT77qmt76kyZeTun7BH2RvAdYSLevKHk1q9jRrXRyn4stCMgSR79yEHdzhp?cluster=devnet) |
+| The dashboard a company signs into (Privy email login, embedded Solana wallet) and the same JSON API for AI agents | [`dashboard/`](dashboard), [`client/src/bin/vineland-node.rs`](client/src/bin/vineland-node.rs) |
 | A relayer service and a user CLI, run together on a local validator | [`client/src/bin/relayer.rs`](client/src/bin/relayer.rs), [`client/src/bin/vineland.rs`](client/src/bin/vineland.rs), [`client/scripts/local_e2e.sh`](client/scripts/local_e2e.sh) |
 | The pitch deck, 10 slides | [`docs/vineland-deck.pdf`](docs/vineland-deck.pdf) |
 
@@ -64,6 +65,26 @@ Vineland is a privacy layer a business, or an AI agent's operator, puts in front
 | **Vineland** | **approved wallets only** | **public, fixed note** | **hidden among approved depositors** | **none (hash-only STARKs)** |
 
 Compliance happens at the entry, not by surveilling the exit. That is the design choice that makes private payments usable by businesses that answer to regulators.
+
+---
+
+## Use it: the dashboard
+
+`vineland-node` runs on the payer's own machine and serves the dashboard at `http://localhost:8790`. It keeps the notes (each secret is the money) in files only that user can read, proves on that machine, and sends the relayer nothing but a recipient-bound proof.
+
+- **A company** signs in with email through Privy and gets an embedded Solana wallet. The operator approves that wallet (KYC at the door), the wallet signs its deposits in the browser, and paying a supplier is a form: recipient, reference, Pay privately. The dashboard shows the proof being made locally, then Solana verifying it, then the payout with its explorer link. Every payout leaves a receipt only the company holds, exportable as CSV for its auditor.
+- **An AI agent** runs the same node with its own approved wallet (`VINELAND_KEYPAIR`) and calls the same API with the bearer token the node prints: `POST /api/pay {"to": ..., "notes": 1, "reference": ...}`, then polls `GET /api/jobs/<id>`.
+- **Local only by construction:** the node binds 127.0.0.1, every API call needs the token, the Host header must be the node (no DNS rebinding) and a POST must come from its own origin (no cross-site requests). It refuses mainnet.
+
+```bash
+cd client && cargo build --release --bins
+target/release/vineland-node setup            # a demo pool on devnet: operator, test dollar, two seed notes
+RELAYER_KEYPAIR=~/.vineland/devnet/relayer.json target/release/relayer &
+cd ../dashboard && bun install && VITE_PRIVY_APP_ID=<your Privy app id> bunx vite build
+cd ../client && target/release/vineland-node  # http://localhost:8790
+```
+
+On devnet a private payment takes about ten minutes today (about 213 transactions to verify the proof on chain); the dashboard and the relayer report each step.
 
 ---
 

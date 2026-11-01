@@ -441,6 +441,12 @@ impl Rpc {
     /// blockhash only those not seen by the time the round ends. A WRITE landing
     /// twice rewrites the same bytes; one landing after SEAL fails harmlessly.
     pub fn land_all(&self, batch: &[Vec<Instruction>], payer: &Keypair) -> Result<Vec<Signature>, String> {
+        self.land_all_with(batch, payer, &mut |_| {})
+    }
+
+    /// [`Rpc::land_all`], calling `landed(n)` whenever the count of confirmed
+    /// transactions grows (a relayer reports upload progress with it).
+    pub fn land_all_with(&self, batch: &[Vec<Instruction>], payer: &Keypair, landed: &mut dyn FnMut(usize)) -> Result<Vec<Signature>, String> {
         let mut sigs: Vec<Option<Signature>> = vec![None; batch.len()];
         let mut done = vec![false; batch.len()];
         let no_preflight = RpcSendTransactionConfig { skip_preflight: true, ..Default::default() };
@@ -479,6 +485,7 @@ impl Rpc {
                         }
                     }
                 }
+                landed(done.iter().filter(|d| **d).count());
             }
         }
         if done.iter().any(|d| !d) {
@@ -544,6 +551,22 @@ impl Rpc {
             .collect();
         deposits.sort_by_key(|d| d.index);
         Ok(deposits)
+    }
+
+    /// Which of `nullifiers` are spent in `pool` (their record exists), in
+    /// order, read in batches of 100 accounts.
+    pub fn spent(&self, pool: &Pubkey, nullifiers: &[[u8; 32]]) -> Result<Vec<bool>, String> {
+        let mut out = Vec::with_capacity(nullifiers.len());
+        for chunk in nullifiers.chunks(100) {
+            let keys: Vec<Pubkey> = chunk.iter().map(|n| nullifier_address(pool, n)).collect();
+            let accounts = self
+                .client
+                .get_multiple_accounts_with_commitment(&keys, CommitmentConfig::confirmed())
+                .map_err(|e| format!("read nullifier records: {e}"))?
+                .value;
+            out.extend(accounts.iter().map(|a| a.as_ref().is_some_and(|a| a.owner == POOL_ID)));
+        }
+        Ok(out)
     }
 
     /// An SPL token account's balance, `None` if there is no such account.

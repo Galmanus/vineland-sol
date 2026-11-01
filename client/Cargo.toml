@@ -28,6 +28,9 @@ hex = { version = "0.4", features = ["serde"] }
 # The relayer's HTTP server: synchronous, like the blocking RpcClient it
 # drives, so no async runtime bridge (adds tiny_http, ascii 1, chunked_transfer).
 tiny_http = "0.12"
+# vineland-node hands unsigned transactions to the browser wallet (Privy) to sign
+bincode = "1.3.3"
+base64 = "0.22.1"
 # The CLI's HTTP client for the relayer. Already in the lock through
 # solana-rpc-client with exactly these features, so this adds no crate.
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "json"] }
