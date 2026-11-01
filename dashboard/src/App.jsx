@@ -95,7 +95,7 @@ function Landing({ onLogin, authorize }) {
         </div>
         <div className="pills">
           <span className="pill gold">post-quantum</span>
-          <span className="pill">Solana devnet · not audited</span>
+          <span className="pill">Solana devnet</span>
         </div>
       </header>
       <main className="hero">
@@ -158,7 +158,7 @@ function Authorize({ code: initial }) {
         </div>
         <div className="pills">
           <span className="pill gold">post-quantum</span>
-          <span className="pill">Solana devnet · not audited</span>
+          <span className="pill">Solana devnet</span>
         </div>
       </header>
       <main className="hero narrow">
@@ -238,7 +238,7 @@ function Dashboard({ address, signer, who, onLogout }) {
         </nav>
         <div className="side-foot">
           <span className="pill gold">post-quantum</span>
-          <span className="pill">devnet · not audited</span>
+          <span className="pill">devnet</span>
         </div>
       </aside>
       <section className="main">
@@ -712,7 +712,7 @@ function Settings({ cfg, st }) {
             ))}
           </tbody>
         </table></div>
-        <p className="muted small">Devnet only. Not audited. Amounts are public by design; the link between payer and payee is what Vineland removes.</p>
+        <p className="muted small">Devnet only. Amounts are public by design; the link between payer and payee is what Vineland removes.</p>
       </div>
     </div>
   );
