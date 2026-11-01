@@ -637,6 +637,11 @@ fn status(node: &Node, user: &str, wallet: Option<&str>) -> Reply {
         },
         "relayer": relayer_get(node, "/health"),
     });
+    if node.privy.is_some() {
+        let mine: Vec<StoredNote> = node.store.all().into_iter().filter(|n| n.user == user).collect();
+        let count = |s: &str| mine.iter().filter(|n| n.state == s).count();
+        out["account"] = json!({ "notes": { "deposited": count("deposited"), "spent": count("spent"), "exited": count("exited") } });
+    }
     if let Ok(w) = wallet_of(node, wallet) {
         let notes: Vec<StoredNote> = node.store.all().into_iter().filter(|n| n.wallet == w.to_string() && owns(node, user, &n.user)).collect();
         let count = |s: &str| notes.iter().filter(|n| n.state == s).count();
@@ -790,9 +795,18 @@ fn deposit_keypair(node: &Arc<Node>, user: &str, body: &Value) -> Reply {
 }
 
 fn pay(node: &Arc<Node>, user: &str, body: &Value) -> Reply {
+    // An AI agent acting for a signed-in user (a Privy agent grant) need not know
+    // the wallet: on a hosted node it pays from that user's notes.
+    let agent_default = || -> Option<Pubkey> {
+        node.privy.as_ref()?;
+        node.store.all().into_iter().find(|n| n.user == user && n.state == "deposited").and_then(|n| n.wallet.parse().ok())
+    };
     let w = match wallet_of(node, body["wallet"].as_str()) {
         Ok(w) => w,
-        Err(e) => return refuse(400, e),
+        Err(e) => match agent_default() {
+            Some(w) => w,
+            None => return refuse(400, if node.privy.is_some() { "no notes ready to pay on this account".to_string() } else { e }),
+        },
     };
     let Some(to) = body["to"].as_str().and_then(|t| t.parse::<Pubkey>().ok()) else { return refuse(400, "`to` must be a wallet address") };
     let count = body["notes"].as_u64().unwrap_or(1).clamp(1, 10) as usize;

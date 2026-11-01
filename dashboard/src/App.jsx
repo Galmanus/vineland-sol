@@ -1,9 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import { useCreateWallet, useSignTransaction, useWallets } from "@privy-io/react-auth/solana";
-import { api, b64ToBytes, explorer, sendRaw, short, setAuthProvider, HOSTED } from "./api.js";
+import { agentsApi, api, b64ToBytes, explorer, sendRaw, short, setAuthProvider, HOSTED } from "./api.js";
 
 const DEVNET_RPC = "https://api.devnet.solana.com";
+// vineland.app/app/authorize?user_code=...: the page an AI agent sends its owner to.
+const AUTHORIZE = /\/authorize\.?\/?$/.test(window.location.pathname);
+const USER_CODE = new URLSearchParams(window.location.search).get("user_code") || "";
 const units = (n) => (n / 1_000_000).toFixed(2);
 
 // ---- shells: who signs ----------------------------------------------------------------
@@ -44,7 +47,8 @@ function PrivyShell() {
     [wallet, signTransaction],
   );
   if (!ready) return <Splash text="Loading" />;
-  if (!authenticated) return <Landing onLogin={login} />;
+  if (!authenticated) return <Landing onLogin={login} authorize={AUTHORIZE} />;
+  if (AUTHORIZE) return <Authorize code={USER_CODE} />;
   if (walletErr) return <Splash text={`Wallet error: ${walletErr}. Sign out and in again.`} />;
   if (!address) return <Splash text={walletsReady ? "Creating your Solana wallet" : "Loading your wallet"} />;
   return <Dashboard address={address} signer={signer} who={user?.email?.address} onLogout={logout} />;
@@ -81,9 +85,10 @@ function Splash({ text }) {
   );
 }
 
-function Landing({ onLogin }) {
+function Landing({ onLogin, authorize }) {
   return (
     <div className="landing">
+      {authorize && <div className="banner">An AI agent is asking for access to your Vineland account. Sign in to review the request.</div>}
       <header className="topbar">
         <div className="brand">
           <Mark /> <span>Vineland</span>
@@ -127,6 +132,75 @@ function Landing({ onLogin }) {
             )}
           </li>
         </ul>
+      </main>
+    </div>
+  );
+}
+
+function Authorize({ code: initial }) {
+  const [code, setCode] = useState(initial);
+  const [state, setState] = useState("");
+  const [err, setErr] = useState("");
+  const act = async (action) => {
+    setErr("");
+    try {
+      await agentsApi.verify(code.trim(), action);
+      setState(action === "approve" ? "approved" : "denied");
+    } catch (e) {
+      setErr(e.message);
+    }
+  };
+  return (
+    <div className="landing">
+      <header className="topbar">
+        <div className="brand">
+          <Mark /> <span>Vineland</span>
+        </div>
+        <div className="pills">
+          <span className="pill gold">post-quantum</span>
+          <span className="pill">Solana devnet · not audited</span>
+        </div>
+      </header>
+      <main className="hero narrow">
+        <p className="eyebrow">Agent access</p>
+        <h1 className="h1-sm">An AI agent wants to pay from your Vineland account.</h1>
+        {state === "approved" ? (
+          <p className="lede">
+            Approved. The agent can now make private payouts from your notes. You can revoke it any time from the Agents page.{" "}
+            <a href="./">Open the dashboard →</a>
+          </p>
+        ) : state === "denied" ? (
+          <p className="lede">
+            Denied. The agent got nothing. <a href="./">Open the dashboard →</a>
+          </p>
+        ) : (
+          <>
+            <ul className="points single">
+              <li>
+                <b>It can</b> make private payouts from this account's notes through the Vineland API.
+              </li>
+              <li>
+                <b>It never receives a key.</b> It gets a 15-minute token that renews for up to 30 days, only while you allow it.
+              </li>
+              <li>
+                <b>You can revoke it</b> any time from the Agents page; renewals stop at once.
+              </li>
+            </ul>
+            <label>
+              Code shown by the agent
+              <input value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} placeholder="XXXXX-XXXXX" />
+            </label>
+            <div className="row">
+              <button className="btn primary big-inline" disabled={!code.trim()} onClick={() => act("approve")}>
+                Approve this agent
+              </button>
+              <button className="btn" onClick={() => act("deny")}>
+                Deny
+              </button>
+            </div>
+            {err && <div className="alert">{err}</div>}
+          </>
+        )}
       </main>
     </div>
   );
@@ -523,6 +597,67 @@ function Receipts({ address }) {
   );
 }
 
+function ConnectedAgents() {
+  const [grants, setGrants] = useState(null);
+  const [err, setErr] = useState("");
+  const load = useCallback(() => {
+    agentsApi
+      .grants()
+      .then((g) => setGrants(Array.isArray(g) ? g : g.grants || g.data || []))
+      .catch((e) => setErr(e.message));
+  }, []);
+  useEffect(load, [load]);
+  const revoke = async (id) => {
+    try {
+      await agentsApi.revoke(id);
+      load();
+    } catch (e) {
+      setErr(e.message);
+    }
+  };
+  return (
+    <div className="card wide">
+      <div className="label">Agents with access to this account</div>
+      <p className="muted small">
+        An agent asks for access with <span className="mono">python3 vineland-agent.py connect</span> (in the repo's client/scripts); you approve its code at
+        vineland.app/app/authorize. It never receives a key, and you can revoke it here.
+      </p>
+      {err && <div className="alert">{err}</div>}
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Granted</th>
+              <th>Last used</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {grants && grants.length === 0 && (
+              <tr>
+                <td colSpan="3" className="muted">
+                  No agent has access.
+                </td>
+              </tr>
+            )}
+            {(grants || []).map((g) => (
+              <tr key={g.id}>
+                <td>{g.created_at ? new Date(g.created_at).toLocaleString() : "–"}</td>
+                <td>{g.last_used_at ? new Date(g.last_used_at).toLocaleString() : "never"}</td>
+                <td>
+                  <button className="btn" onClick={() => revoke(g.id)}>
+                    Revoke
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function Agents({ cfg }) {
   const base = HOSTED ? "http://localhost:8790" : window.location.origin;
   const snippet = `# what the agent's wallet can pay with right now
@@ -548,6 +683,7 @@ curl -s ${base}/api/jobs/<JOB_ID> -H "Authorization: Bearer $VINELAND_TOKEN"`;
         </p>
         <pre>{snippet}</pre>
       </div>
+      {HOSTED && <ConnectedAgents />}
     </div>
   );
 }

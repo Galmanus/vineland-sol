@@ -15,6 +15,25 @@ async function bearer() {
 }
 
 export const HOSTED = import.meta.env.VITE_HOSTED === "1";
+export const PRIVY_APP_ID = import.meta.env.VITE_PRIVY_APP_ID || "";
+
+// Privy's device-authorization endpoints, called with the signed-in user's
+// session: approve an agent's code, list the agents with access, revoke one.
+async function privy(method, path, body) {
+  const res = await fetch(`https://auth.privy.io/api/oauth/v2${path}`, {
+    method,
+    headers: { "privy-app-id": PRIVY_APP_ID, Authorization: `Bearer ${await bearer()}`, ...(body ? { "Content-Type": "application/json" } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error_description || data.error || data.message || `HTTP ${res.status}`);
+  return data;
+}
+export const agentsApi = {
+  verify: (user_code, action) => privy("POST", "/device_verify", { user_code, action }),
+  grants: () => privy("GET", "/grants"),
+  revoke: (id) => privy("DELETE", `/grants/${id}`),
+};
 
 async function call(method, path, body) {
   const res = await fetch(path, {
