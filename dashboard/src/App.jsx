@@ -618,10 +618,7 @@ function ConnectedAgents() {
   return (
     <div className="card wide">
       <div className="label">Agents with access to this account</div>
-      <p className="muted small">
-        An agent asks for access with <span className="mono">python3 vineland-agent.py connect</span> (in the repo's client/scripts); you approve its code at
-        vineland.app/app/authorize. It never receives a key, and you can revoke it here.
-      </p>
+      <p className="muted small">Revoking stops renewals at once; an access token already issued expires within 15 minutes.</p>
       {err && <div className="alert">{err}</div>}
       <div className="table-wrap">
         <table>
@@ -659,8 +656,22 @@ function ConnectedAgents() {
 }
 
 function Agents({ cfg }) {
-  const base = HOSTED ? "http://localhost:8790" : window.location.origin;
-  const snippet = `# what the agent's wallet can pay with right now
+  const [code, setCode] = useState("");
+  const base = window.location.origin;
+  const script = "https://raw.githubusercontent.com/Galmanus/vineland-sol/main/client/scripts/vineland-agent.py";
+  const hostedSteps = `# 1. the agent asks for access (Python 3, standard library only)
+curl -sO ${script}
+python3 vineland-agent.py connect
+#    -> prints a code and a link; you approve it here
+
+# 2. once approved, the agent pays a provider privately: one call
+python3 vineland-agent.py pay --to <PROVIDER_WALLET> --reference data-api-nov
+
+# the same over plain HTTP, with the agent's access token
+curl -s -X POST ${base}/api/pay \\
+  -H "Authorization: Bearer $AGENT_ACCESS_TOKEN" -H "Content-Type: application/json" \\
+  -d '{"to": "<PROVIDER_WALLET>", "notes": 1, "reference": "data-api-nov"}'`;
+  const localSteps = `# what the agent's wallet can pay with right now
 curl -s ${base}/api/status -H "Authorization: Bearer $VINELAND_TOKEN"
 
 # pay a provider privately: one call, the proof is made on this machine
@@ -677,11 +688,46 @@ curl -s ${base}/api/jobs/<JOB_ID> -H "Authorization: Bearer $VINELAND_TOKEN"`;
           An AI agent that pays for data, models and APIs in stablecoins tells everyone watching the chain who it works for and what it buys.
           Through Vineland the provider is paid from the vault: nobody can map which agent bought which service.
         </p>
-        <p className="muted small">
-          The agent runs the open-source node next to it, with its own approved wallet (<span className="mono">VINELAND_KEYPAIR</span>), and calls the same API this
-          dashboard uses. The token is printed when the node starts; the agent's secrets stay on the agent's machine.
-        </p>
-        <pre>{snippet}</pre>
+        {HOSTED ? (
+          <>
+            <div className="steps three">
+              <div className="step on">
+                <b>1 · The agent asks.</b> It runs one command and shows you a short code.
+              </div>
+              <div className="step on">
+                <b>2 · You approve.</b> Paste the code below, or open the link it printed. The agent never receives a key.
+              </div>
+              <div className="step on">
+                <b>3 · It pays.</b> Private payouts from this account's notes, until you revoke it.
+              </div>
+            </div>
+            <form
+              className="row"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (code.trim()) window.location.href = `./authorize?user_code=${encodeURIComponent(code.trim().toUpperCase())}`;
+              }}
+            >
+              <input className="code-input" value={code} onChange={(e) => setCode(e.target.value)} placeholder="Agent's code, e.g. ABCDE-FGHIJ" />
+              <button className="btn primary" disabled={!code.trim()}>
+                Review and approve
+              </button>
+            </form>
+            <pre>{hostedSteps}</pre>
+            <p className="muted small">
+              Access tokens last 15 minutes and renew for up to 30 days, only while you allow it. Want the agent's secrets on the agent's own machine
+              instead? It can run the open-source node (keypair mode) and call it locally.
+            </p>
+          </>
+        ) : (
+          <>
+            <p className="muted small">
+              The agent runs this node with its own approved wallet (<span className="mono">VINELAND_KEYPAIR</span>) and calls the same API this dashboard uses.
+              The token is printed when the node starts; the agent's secrets stay on the agent's machine.
+            </p>
+            <pre>{localSteps}</pre>
+          </>
+        )}
       </div>
       {HOSTED && <ConnectedAgents />}
     </div>

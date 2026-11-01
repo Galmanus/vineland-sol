@@ -147,3 +147,8 @@ pre { background: #0a0a0a; border: 1px solid var(--line); border-radius: 12px; p
 .points.single { grid-template-columns: 1fr; margin: 0 0 28px; }
 .btn.big-inline { padding: 12px 22px; font-size: 15px; }
 @media (max-width: 820px) { .banner { padding: 10px 16px; } .h1-sm { font-size: 26px; } }
+.steps.three { grid-template-columns: repeat(3, 1fr); margin: 16px 0; }
+.steps.three .step { font-size: 14px; line-height: 1.5; }
+.steps.three .step b { color: var(--gold); }
+.code-input { flex: 1; min-width: 220px; margin: 0; font-family: ui-monospace, Menlo, monospace; letter-spacing: 0.08em; }
+@media (max-width: 820px) { .steps.three { grid-template-columns: 1fr; } }
