@@ -1,20 +1,22 @@
 # Vineland
 
-### The privacy layer for stablecoin payments on Solana.
+### The post-quantum privacy layer for stablecoin payments on Solana, for businesses and AI agents.
 
 **The payment is public. The payer isn't.**
 
-`IslandHack V5` · `Solana devnet: live` · `no committee` · `post-quantum STARKs verified on chain` · `MIT`
+`IslandHack V5` · `Solana devnet: live` · `post-quantum` · `no committee` · `for businesses and AI agents` · `MIT`
 
 ---
 
 Stablecoins made dollars programmable. They also made every payment public. On a public ledger, a company that pays its suppliers in USDC publishes its supplier list, its volumes, its payroll and its treasury moves to anyone with an explorer. For a business, that is not transparency. It is operational data, and it is the reason serious money stays off public rails.
 
-Vineland is a privacy layer a business puts in front of its payouts. It removes exactly one thing from the public record: **the link between who paid and who got paid.** Everything an auditor needs stays on chain: who was allowed in, how much moved, and when.
+Vineland is a privacy layer a business, or an AI agent's operator, puts in front of its payouts. It removes exactly one thing from the public record: **the link between who paid and who got paid.** Everything an auditor needs stays on chain: who was allowed in, how much moved, and when.
 
 - **Approved at the door.** An operator allowlists wallets after KYC. Nobody else can enter.
 - **Private on the way out.** A note leaves the vault to a brand-new wallet, submitted by a relayer. The depositor never signs the payout, and nothing on chain says which approved depositor it came from.
-- **Verified by the chain, not by a committee.** Membership is proven with riverrun Circle-STARKs (hash-only, no trusted setup, post-quantum) and the proofs are **verified on Solana itself**, staged across transactions. The membership root is computed on chain from the deposits. No signer can approve a payout.
+- **Post-quantum, because a ledger is forever.** Everything that authorizes a payout and links it to a deposit is a hash: the commitment, the nullifier, the on-chain tree, and a riverrun Circle-STARK. No elliptic curves, no trusted setup. Payments recorded today stay private even against a future quantum computer.
+- **Verified by the chain, not by a committee.** The proofs are **verified on Solana itself**, staged across transactions, and the membership root is computed on chain from the deposits. No signer can approve a payout.
+- **For businesses and AI agents.** Any approved wallet, a company's or an agent's, pays through the same relayer HTTP API and CLI. An agent's payments stop revealing who it works for and which services it buys.
 - **A public way out.** A depositor can reclaim their full note publicly, with no fee, by revealing the note's secret. Nobody's signature is needed and the refund can only go to the depositor. A note leaves exactly once, privately or publicly, never both.
 
 ---
