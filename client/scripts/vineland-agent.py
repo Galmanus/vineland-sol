@@ -35,6 +35,8 @@ def http(method, url, body=None, headers=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
+    # Cloudflare in front of auth.privy.io refuses Python's default user agent (1010).
+    req.add_header("User-Agent", "vineland-agent/0.1 (+https://github.com/Galmanus/vineland-sol)")
     for k, v in (headers or {}).items():
         req.add_header(k, v)
     try:
