@@ -23,14 +23,19 @@
 //!
 //! Encoding: a digest is eight canonical M31 limbs, each a u32 LE, 32 bytes. The
 //! program refuses non-canonical limbs; [`enc`] never produces them.
+//!
+//! [`v2`] is the committee-free program's client side (ids, layouts,
+//! instruction builders, RPC helpers), shared by the devnet demo, the
+//! `vineland` CLI and the `relayer`.
 
 use std::collections::BTreeMap;
 use std::io::Read;
 
 use riverrun_m31::{
     compress, permute, prove_binding_crowd, prove_binding_crowd_for, prove_membership_crowd,
-    prove_membership_crowd_for, verify_binding_crowd, verify_crowd, zk::Seed, CrowdBindingProof,
-    CrowdMembershipProof, PathStep, CONTEXT_LEN, CROWD_DEPTH, DIGEST_LEN, SECRET_LEN, WIDTH,
+    prove_membership_crowd_for, verify_binding_crowd, verify_crowd, verify_crowd_for, zk::Seed,
+    CrowdBindingProof, CrowdMembershipProof, PathStep, CONTEXT_LEN, CROWD_DEPTH, DIGEST_LEN, SECRET_LEN,
+    WIDTH,
 };
 use riverrun_m31_verifier::{client as staged_client, staged};
 use serde::{Deserialize, Serialize};
@@ -46,6 +51,8 @@ use solana_sdk::{
     system_instruction, system_program,
     transaction::Transaction,
 };
+
+pub mod v2;
 
 pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("AsQwEN7XiUPW2MGHEbEkh8UCKixwpSBfE1KKt5QVgYgx");
 
@@ -331,6 +338,8 @@ pub enum Refusal {
     RootNotCurrent,
     Malformed,
     ProofRejected,
+    /// A pool or recipient field that is not a public key.
+    BadAddress,
 }
 
 /// What an honest verifier checks before signing a withdrawal. `onchain_root`
@@ -548,6 +557,50 @@ pub fn prove_withdraw_bound(note: &Note, tree: &Tree, index: u32, recipient: &Pu
         binding: bproof.to_bytes(),
         membership: mproof.to_bytes(),
     }
+}
+
+/// Largest proof a relayer accepts per slot. Production proofs are ~109 KB
+/// (binding) and ~84 KB (membership); the verifier buffer, whose rent the
+/// relayer fronts, grows with them.
+pub const MAX_PROOF_BYTES: usize = 256 * 1024;
+
+/// What a relayer checks natively before it spends anything on a
+/// [`BoundWithdraw`]: both addresses parse, every digest is canonical, each
+/// proof decodes to exactly the bytes it came as (the verifier ignores
+/// trailing bytes, so padding would only inflate the buffer the relayer pays
+/// for), and both proofs verify, bound to `b.recipient`, under the pool's own
+/// contexts. Returns `(pool, recipient)`. Whether the root is one the pool
+/// computed and whether the nullifier is spent are chain reads, left to the
+/// caller.
+pub fn verify_bound(b: &BoundWithdraw) -> Result<(Pubkey, Pubkey), Refusal> {
+    let pool: Pubkey = b.pool.parse().map_err(|_| Refusal::BadAddress)?;
+    let recipient: Pubkey = b.recipient.parse().map_err(|_| Refusal::BadAddress)?;
+    if !(canonical(&b.root) && canonical(&b.c) && canonical(&b.nullifier)) {
+        return Err(Refusal::NonCanonical);
+    }
+    if b.binding.len() > MAX_PROOF_BYTES || b.membership.len() > MAX_PROOF_BYTES {
+        return Err(Refusal::Malformed);
+    }
+    let bp = CrowdBindingProof::from_bytes(&b.binding).ok_or(Refusal::Malformed)?;
+    let mp = CrowdMembershipProof::from_bytes(&b.membership).ok_or(Refusal::Malformed)?;
+    if bp.to_bytes() != b.binding || mp.to_bytes() != b.membership {
+        return Err(Refusal::Malformed);
+    }
+    if !verify_crowd_for(
+        &recipient.to_bytes(),
+        &bp,
+        &mp,
+        note_action(&pool),
+        spend_round(&pool),
+        b.c,
+        b.nullifier,
+        b.root,
+        QUERIES,
+        LOG_BLOWUP,
+    ) {
+        return Err(Refusal::ProofRejected);
+    }
+    Ok((pool, recipient))
 }
 
 /// Query positions per QUERIES transaction: a client choice (the verifier takes
@@ -902,5 +955,42 @@ mod tests {
             let size = 1 + 64 * tx.signatures.len() + tx.message.serialize().len();
             assert!(size <= 1232, "{}: {size} B", t.label);
         }
+    }
+
+    #[test]
+    #[ignore = "proves at production parameters: run with --release"]
+    fn a_relayer_refuses_any_bundle_it_did_not_receive_intact() {
+        let pool = Pubkey::new_unique();
+        let notes: Vec<Note> = (0..3).map(|_| Note::new(&pool)).collect();
+        let tree = Tree::new(notes.iter().enumerate().map(|(i, n)| (i as u32, n.leaf())));
+        let recipient = Pubkey::new_unique();
+        let b = prove_withdraw_bound(&notes[1], &tree, 1, &recipient);
+        assert_eq!(verify_bound(&b), Ok((pool, recipient)));
+        assert!(!serde_json::to_string(&b).unwrap().contains("secret"), "the bundle carries no secret field");
+
+        // The relayer cannot point the payout elsewhere: the proofs are bound.
+        let mut redirected = b.clone();
+        redirected.recipient = Pubkey::new_unique().to_string();
+        assert_eq!(verify_bound(&redirected), Err(Refusal::ProofRejected));
+
+        let mut other_nullifier = b.clone();
+        other_nullifier.nullifier[0] = (other_nullifier.nullifier[0] + 1) % M31_P;
+        assert_eq!(verify_bound(&other_nullifier), Err(Refusal::ProofRejected));
+
+        let mut other_pool = b.clone();
+        other_pool.pool = Pubkey::new_unique().to_string();
+        assert_eq!(verify_bound(&other_pool), Err(Refusal::ProofRejected));
+
+        let mut padded = b.clone();
+        padded.binding.extend_from_slice(&[0u8; 64]);
+        assert_eq!(verify_bound(&padded), Err(Refusal::Malformed));
+
+        let mut non_canonical = b.clone();
+        non_canonical.root[3] = M31_P;
+        assert_eq!(verify_bound(&non_canonical), Err(Refusal::NonCanonical));
+
+        let mut bad_address = b.clone();
+        bad_address.recipient = "not-a-key".into();
+        assert_eq!(verify_bound(&bad_address), Err(Refusal::BadAddress));
     }
 }
