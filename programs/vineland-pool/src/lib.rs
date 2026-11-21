@@ -52,7 +52,7 @@
 
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, TransferChecked};
-use riverrun_m31::{compress, permute, CONTEXT_LEN, DIGEST_LEN, SECRET_LEN, WIDTH};
+use riverrun_m31::{compress, permute, CROWD_DEPTH, LOG_ROWS, CONTEXT_LEN, DIGEST_LEN, SECRET_LEN, WIDTH};
 
 mod empty;
 pub use empty::EMPTY;
@@ -60,12 +60,21 @@ pub use empty::EMPTY;
 declare_id!("3W1FD5Q1ELFzVAoJUasSj3aZGmgs4zrRdgfZZV1K5VXi");
 
 /// The riverrun M31 staged verifier (`programs/riverrun-m31-verifier` in
-/// mirror-pool at ce5e8c7). Fixed in code: an operator who could name the
+/// mirror-pool at b4aadf0). Fixed in code: an operator who could name the
 /// verifier could name one that finalizes anything.
 pub const VERIFIER_ID: Pubkey = pubkey!("8vPHUTH27WXYNvNoaBTJGWWceNSVrNXHZSTYkaywkcYo");
 
-/// Depth of riverrun's crowd membership tree (`riverrun_m31::CROWD_DEPTH`).
+/// Depth of the on-chain membership tree, in fold levels.
+///
+/// This must be `riverrun_m31::CROWD_DEPTH`. The verifier pins
+/// `degree_bits` to `log2(CROWD_DEPTH + 1)` plus the hiding pad, and that
+/// trace height is `2^LOG_ROWS`. A pool built at any other depth would be
+/// settling a different opening than the one the verifier accepts.
 pub const DEPTH: usize = 127;
+
+const _: () = assert!(DEPTH == CROWD_DEPTH);
+const _: () = assert!(DEPTH + 1 == 1 << LOG_ROWS);
+
 /// Recent roots a withdrawal may name, so a deposit landing between proving and
 /// settling does not invalidate the proof.
 pub const ROOT_HISTORY: usize = 16;
@@ -74,7 +83,7 @@ pub const ROOT_HISTORY: usize = 16;
 /// cannot be initialized to confiscate notes.
 const MAX_FEE_BPS: u16 = 1_000;
 
-// Verifier buffer layout (`riverrun-m31-verifier/src/staged.rs`, ce5e8c7).
+// Verifier buffer layout (`riverrun-m31-verifier/src/staged.rs`, b4aadf0).
 const B_FINALIZED: usize = 40;
 const B_ROOT: usize = 41;
 const B_NULLIFIER: usize = 73;
