@@ -1,10 +1,10 @@
 # Vineland
 
-### The post-quantum privacy layer for stablecoin payments on Solana, for businesses and AI agents.
+### A hash-based STARK privacy layer for stablecoin payments on Solana, for businesses and AI agents. Devnet, not audited.
 
 **The payment is public. The payer isn't.**
 
-`IslandHack V5` · `Solana devnet: live` · `post-quantum` · `no committee` · `for businesses and AI agents` · `MIT`
+`IslandHack V5` · `Solana devnet: live` · `hash-based STARK` · `not audited` · `no committee` · `for businesses and AI agents` · `MIT`
 
 ---
 
@@ -14,7 +14,7 @@ Vineland is a privacy layer a business, or an AI agent's operator, puts in front
 
 - **Approved at the door.** An operator allowlists wallets after KYC. Nobody else can enter.
 - **Private on the way out.** A note leaves the vault to a brand-new wallet, submitted by a relayer. The depositor never signs the payout, and nothing on chain says which approved depositor it came from.
-- **Post-quantum, because a ledger is forever.** Everything that authorizes a payout and links it to a deposit is a hash: the commitment, the nullifier, the on-chain tree, and a riverrun Circle-STARK. No elliptic curves, no trusted setup. Payments recorded today stay private even against a future quantum computer.
+- **Hash-based authorization, research-stage.** A payout is authorized by hashes and a riverrun Circle-STARK: the commitment, the nullifier, and the on-chain tree. There is no elliptic-curve proof in that path and no trusted setup. Solana's own transaction signatures stay classical. This build is devnet-only and has not been independently audited. That design is not a claim that a payment is quantum-secure, or that a record stays private against a future quantum computer.
 - **Verified by the chain, not by a committee.** The proofs are **verified on Solana itself**, staged across transactions, and the membership root is computed on chain from the deposits. No signer can approve a payout.
 - **For businesses and AI agents.** Any approved wallet, a company's or an agent's, pays through the same relayer HTTP API and CLI. An agent's payments stop revealing who it works for and which services it buys.
 - **A public way out.** A depositor can reclaim their full note publicly, with no fee, by revealing the note's secret. Nobody's signature is needed and the refund can only go to the depositor. A note leaves exactly once, privately or publicly, never both.
@@ -176,13 +176,13 @@ Every digest the program accepts is 8 canonical Mersenne-31 limbs. Anything else
 | **The operator** | for the allowlist | it decides who may deposit; it cannot publish a root, approve a payout, or block an exit |
 | **The two programs** | yes | their code and their upgrade authorities (devnet: the author's key) |
 
-**Post-quantum, precisely.** Everything that authorizes a payout is a hash: the commitment, the nullifier, the on-chain tree, and the STARK the chain verifies. Spending a note needs no elliptic-curve signature from its owner. What remains classical is Solana's own transaction signatures (the relayer's fee payment, a depositor's deposit, the operator's allowlist), which can neither redirect a payout nor forge one.
+**What is hash-based.** The commitment, the nullifier, the on-chain tree, and the STARK the chain verifies are hashes. Spending a note needs no elliptic-curve signature from its owner. Solana's own transaction signatures stay classical (the relayer's fee payment, a depositor's deposit, the operator's allowlist). Those signatures do not redirect a payout. They are not post-quantum, and neither the STARK parameters nor the hash functions are claimed to be quantum-secure. See [SELF_AUDIT.md](SELF_AUDIT.md).
 
 **What the anonymity set is.** The deposits under the root a withdrawal names, minus public exits. It counts deposits, not people: the operator, who controls the allowlist, could fill it with its own notes. riverrun's ruler measures effective anonymity instead of advertising it: on a live Solana mainnet pool, an advertised `k = 30` was worth an effective 6.5, and a lone depositor exactly 1.
 
 **Known limits.** An exit reveals the note's secret in its transaction; if that transaction does not land, resend it at once (a copied secret would need a full ~200-transaction verification to be used). Only the last 16 roots are accepted, so a proof older than 16 deposits must be remade. Verification costs about 213 transactions and ~1.37 SOL of buffer rent up front (returned on close); Solana's 4 KB transactions, live since September 2026, would cut the upload part about fourfold.
 
-**Not audited.** Devnet only. An external audit and production review come before mainnet.
+**Not audited.** Devnet only. [SELF_AUDIT.md](SELF_AUDIT.md) is a self-review by the author, not an independent audit. [SECURITY.md](SECURITY.md) is how to report a problem. An external audit and a production review come before any mainnet use. The verifier's trace-height pin (C-01) is in [mirror-pool#1](https://github.com/Galmanus/mirror-pool/pull/1) and is not deployed.
 
 ---
 
