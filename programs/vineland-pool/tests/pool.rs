@@ -46,7 +46,7 @@ const NON_CANONICAL: u32 = 6013;
 // Anchor framework errors.
 const ACCOUNT_NOT_INITIALIZED: u32 = 3012;
 
-// Verifier buffer layout (riverrun-m31-verifier/src/staged.rs at ce5e8c7).
+// Verifier buffer layout (riverrun-m31-verifier/src/staged.rs at b4aadf0).
 const B_FINALIZED: usize = 40;
 const B_ROOT: usize = 41;
 const B_NULLIFIER: usize = 73;
